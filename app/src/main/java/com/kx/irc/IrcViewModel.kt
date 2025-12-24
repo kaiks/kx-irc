@@ -41,6 +41,10 @@ class IrcViewModel : ViewModel() {
         config = config.update()
     }
 
+    fun replaceConfig(newConfig: IrcConfig) {
+        config = newConfig
+    }
+
     fun connect() {
         val error = config.validate()
         if (error != null) {
@@ -49,9 +53,7 @@ class IrcViewModel : ViewModel() {
         }
         syncTargetsFromConfig()
         client.connect(config)
-        if (currentTarget.isBlank()) {
-            currentTarget = "server"
-        }
+        currentTarget = preferredTargetAfterConnect()
     }
 
     fun disconnect() {
@@ -77,6 +79,14 @@ class IrcViewModel : ViewModel() {
 
     fun serverTargets(): List<TargetEntry> =
         targetMeta.filter { it.kind == TargetKind.SERVER }.sortedByDescending { it.lastActivity }
+
+    fun preferredTargetAfterConnect(): String {
+        val channel = channelTargets().firstOrNull()?.name ?: config.channelList().firstOrNull()
+        if (!channel.isNullOrBlank()) return channel
+        val privateTarget = privateTargets().firstOrNull()?.name
+        if (!privateTarget.isNullOrBlank()) return privateTarget
+        return "server"
+    }
 
     override fun onCleared() {
         client.shutdown()

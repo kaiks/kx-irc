@@ -47,6 +47,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.view.KeyEvent
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.text.AnnotatedString
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
@@ -55,6 +62,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 @Composable
 fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
     KxIrcTheme {
+        val context = LocalContext.current
+        val store = remember { ConnectionStore(context) }
+        LaunchedEffect(Unit) {
+            viewModel.replaceConfig(store.load())
+        }
         val drawerState = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
         ModalNavigationDrawer(
@@ -73,7 +85,12 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
                 topBar = {
                     Header(
                         viewModel = viewModel,
-                        onMenu = { scope.launch { drawerState.open() } }
+                        onMenu = { scope.launch { drawerState.open() } },
+                        onConnect = {
+                            store.save(viewModel.config)
+                            viewModel.connect()
+                        },
+                        onDisconnect = { viewModel.disconnect() }
                     )
                 }
             ) { padding ->
@@ -99,7 +116,12 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
 }
 
 @Composable
-private fun Header(viewModel: IrcViewModel, onMenu: () -> Unit) {
+private fun Header(
+    viewModel: IrcViewModel,
+    onMenu: () -> Unit,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit
+) {
     val status = viewModel.status
     val network = when (status) {
         is ConnectionStatus.Connected -> status.server
@@ -117,7 +139,7 @@ private fun Header(viewModel: IrcViewModel, onMenu: () -> Unit) {
         actions = {
             val isConnected = status is ConnectionStatus.Connected || status is ConnectionStatus.Connecting
             Button(
-                onClick = { if (isConnected) viewModel.disconnect() else viewModel.connect() },
+                onClick = { if (isConnected) onDisconnect() else onConnect() },
                 modifier = Modifier.testTag("connectButton").widthIn(min = 120.dp)
             ) {
                 Text(if (isConnected) "Disconnect" else "Connect")
@@ -201,7 +223,29 @@ private fun ConnectionForm(viewModel: IrcViewModel) {
 @Composable
 private fun MessageList(viewModel: IrcViewModel) {
     val messages = viewModel.visibleMessages()
+    val listState = rememberLazyListState()
+    val atBottom by remember {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            lastVisible >= layoutInfo.totalItemsCount - 1
+        }
+    }
+    val currentTarget = viewModel.currentTarget
+
+    LaunchedEffect(currentTarget) {
+        if (messages.isNotEmpty()) {
+            listState.scrollToItem(messages.size - 1)
+        }
+    }
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty() && atBottom) {
+            listState.scrollToItem(messages.size - 1)
+        }
+    }
+
     LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 240.dp, max = 420.dp)
@@ -209,18 +253,13 @@ private fun MessageList(viewModel: IrcViewModel) {
         contentPadding = PaddingValues(bottom = 8.dp)
     ) {
         items(messages, key = { it.id }) { message ->
-            Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Text(
-                    text = "${message.sender} -> ${message.target}",
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = buildStyledMessage(message.body),
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
+            Text(
+                text = formatMessageLine(message),
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            )
         }
     }
 }
@@ -292,4 +331,13 @@ private fun DrawerContent(viewModel: IrcViewModel, onSelect: (String) -> Unit) {
             )
         }
     }
+}
+
+private val TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+
+private fun formatMessageLine(message: IrcMessage): AnnotatedString {
+    val time = message.timestamp.atZone(ZoneId.systemDefault()).toLocalTime().format(TIME_FORMATTER)
+    val prefix = "$time (${message.sender}) "
+    val body = buildStyledMessage(message.body).text
+    return AnnotatedString(prefix + body)
 }
