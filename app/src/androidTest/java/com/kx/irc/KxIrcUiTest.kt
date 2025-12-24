@@ -45,7 +45,6 @@ class KxIrcUiTest {
 
     @Test
     fun canSendLocalMessageWithoutConnection() {
-        rule.onNodeWithTag("targetField").performTextInput("#one")
         rule.onNodeWithTag("messageField").performTextInput("hello")
         rule.onNodeWithTag("sendButton").performClick()
 
@@ -56,5 +55,11 @@ class KxIrcUiTest {
     fun menuOpensDrawer() {
         rule.onNodeWithTag("menuButton").performClick()
         rule.onNodeWithTag("drawer").assertIsDisplayed()
+    }
+
+    @Test
+    fun drawerHasCloseButton() {
+        rule.onNodeWithTag("menuButton").performClick()
+        rule.onNodeWithTag("drawerClose").assertIsDisplayed()
     }
 }

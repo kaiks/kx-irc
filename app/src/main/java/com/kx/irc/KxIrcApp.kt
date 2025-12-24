@@ -48,6 +48,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.view.KeyEvent
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.derivedStateOf
@@ -56,8 +58,10 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.runtime.rememberCoroutineScope
+import java.time.LocalTime
 
 @Composable
 fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
@@ -77,7 +81,8 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
                     onSelect = {
                         viewModel.setTarget(it)
                         scope.launch { drawerState.close() }
-                    }
+                    },
+                    onClose = { scope.launch { drawerState.close() } }
                 )
             }
         ) {
@@ -267,14 +272,9 @@ private fun MessageList(viewModel: IrcViewModel) {
 @Composable
 private fun MessageComposer(viewModel: IrcViewModel) {
     var message by remember { mutableStateOf("") }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(
-            value = viewModel.currentTarget,
-            onValueChange = { viewModel.setTarget(it) },
-            label = { Text("Target") },
-            modifier = Modifier.fillMaxWidth().testTag("targetField"),
-            singleLine = true
-        )
         OutlinedTextField(
             value = message,
             onValueChange = { message = it },
@@ -284,6 +284,8 @@ private fun MessageComposer(viewModel: IrcViewModel) {
                 if (native.keyCode == KeyEvent.KEYCODE_ENTER && native.action == KeyEvent.ACTION_UP) {
                     viewModel.sendMessage(message)
                     message = ""
+                    focusManager.clearFocus()
+                    keyboardController?.hide()
                     true
                 } else {
                     false
@@ -295,6 +297,8 @@ private fun MessageComposer(viewModel: IrcViewModel) {
             onClick = {
                 viewModel.sendMessage(message)
                 message = ""
+                focusManager.clearFocus()
+                keyboardController?.hide()
             },
             modifier = Modifier.testTag("sendButton")
         ) {
@@ -304,9 +308,18 @@ private fun MessageComposer(viewModel: IrcViewModel) {
 }
 
 @Composable
-private fun DrawerContent(viewModel: IrcViewModel, onSelect: (String) -> Unit) {
+private fun DrawerContent(viewModel: IrcViewModel, onSelect: (String) -> Unit, onClose: () -> Unit) {
     ModalDrawerSheet(modifier = Modifier.testTag("drawer")) {
-        Text("Channels", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Channels", style = MaterialTheme.typography.titleSmall)
+            IconButton(onClick = onClose, modifier = Modifier.testTag("drawerClose")) {
+                Icon(Icons.Filled.Close, contentDescription = "Close")
+            }
+        }
         viewModel.channelTargets().forEach { entry ->
             NavigationDrawerItem(
                 label = { Text(entry.name) },
@@ -336,8 +349,25 @@ private fun DrawerContent(viewModel: IrcViewModel, onSelect: (String) -> Unit) {
 private val TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
 
 private fun formatMessageLine(message: IrcMessage): AnnotatedString {
-    val time = message.timestamp.atZone(ZoneId.systemDefault()).toLocalTime().format(TIME_FORMATTER)
+    val (zncTime, cleanedBody) = extractZncTimestamp(message.body)
+    val time = (zncTime ?: message.timestamp.atZone(ZoneId.systemDefault()).toLocalTime())
+        .format(TIME_FORMATTER)
     val prefix = "$time (${message.sender}) "
-    val body = buildStyledMessage(message.body).text
+    val body = buildStyledMessage(cleanedBody).text
     return AnnotatedString(prefix + body)
+}
+
+private fun extractZncTimestamp(body: String): Pair<LocalTime?, String> {
+    val trimmed = body.trimStart()
+    if (!trimmed.startsWith("[")) return Pair(null, body)
+    val end = trimmed.indexOf(']')
+    if (end <= 1) return Pair(null, body)
+    val timeCandidate = trimmed.substring(1, end)
+    val time = runCatching { LocalTime.parse(timeCandidate, TIME_FORMATTER) }.getOrNull()
+    return if (time != null) {
+        val remainder = trimmed.substring(end + 1).trimStart()
+        Pair(time, remainder)
+    } else {
+        Pair(null, body)
+    }
 }

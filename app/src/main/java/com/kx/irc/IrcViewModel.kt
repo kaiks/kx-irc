@@ -95,6 +95,9 @@ class IrcViewModel : ViewModel() {
     private fun ensureTargetForMessage(message: IrcMessage) {
         val derived = message.target.ifBlank { "server" }
         ensureTarget(derived)
+        if (currentTarget == "server" && classifyTarget(derived) == TargetKind.CHANNEL) {
+            currentTarget = derived
+        }
     }
 
     private fun syncTargetsFromConfig() {
