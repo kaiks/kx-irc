@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
@@ -258,14 +259,16 @@ private fun MessageList(viewModel: IrcViewModel) {
         contentPadding = PaddingValues(bottom = 8.dp)
     ) {
         items(messages, key = { it.id }) { message ->
-            Text(
-                text = formatMessageLine(message),
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Clip,
-                softWrap = false,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-            )
+            SelectionContainer {
+                Text(
+                    text = formatMessageLine(message),
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                    softWrap = false,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                )
+            }
         }
     }
 }
