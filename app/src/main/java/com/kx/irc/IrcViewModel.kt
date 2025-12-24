@@ -70,6 +70,7 @@ class IrcViewModel : ViewModel() {
 
     fun visibleMessages(): List<IrcMessage> =
         filterMessagesByTarget(messages, currentTarget)
+            .sortedWith(compareBy<IrcMessage> { it.timestamp }.thenBy { it.id })
 
     fun channelTargets(): List<TargetEntry> =
         targetMeta.filter { it.kind == TargetKind.CHANNEL }.sortedByDescending { it.lastActivity }

@@ -78,6 +78,7 @@ class IrcClient {
 
     private fun handleLine(raw: String, config: IrcConfig) {
         val parsed = parseIrcLine(raw)
+        val timestamp = parseServerTime(parsed) ?: Instant.now()
         when (parsed.command.uppercase()) {
             "PING" -> writeLine("PONG :${parsed.trailing ?: parsed.params.firstOrNull().orEmpty()}")
             "001" -> {
@@ -97,7 +98,7 @@ class IrcClient {
                 _messages.tryEmit(
                     IrcMessage(
                         id = idCounter.incrementAndGet(),
-                        timestamp = Instant.now(),
+                        timestamp = timestamp,
                         sender = sender,
                         target = resolvedTarget,
                         body = body,
@@ -112,7 +113,7 @@ class IrcClient {
                     _messages.tryEmit(
                         IrcMessage(
                             id = idCounter.incrementAndGet(),
-                            timestamp = Instant.now(),
+                            timestamp = timestamp,
                             sender = sender,
                             target = channel,
                             body = "* $sender joined",
@@ -130,7 +131,7 @@ class IrcClient {
                     _messages.tryEmit(
                         IrcMessage(
                             id = idCounter.incrementAndGet(),
-                            timestamp = Instant.now(),
+                            timestamp = timestamp,
                             sender = sender,
                             target = channel,
                             body = body,
@@ -147,16 +148,16 @@ class IrcClient {
                 val resolvedTarget = if (
                     target.startsWith("#") || target.startsWith("&") || target.startsWith("+") || target.startsWith("!")
                 ) target else "server"
-                emitServerMessage(resolvedTarget, body)
+                emitServerMessage(resolvedTarget, body, timestamp)
             }
             "ERROR", "QUIT" -> {
                 val quitSender = parseNick(parsed.prefix)
                 val quitReason = parsed.trailing.orEmpty().ifBlank { raw }
-                emitServerMessage("server", "* $quitSender quit ($quitReason)")
+                emitServerMessage("server", "* $quitSender quit ($quitReason)", timestamp)
             }
             else -> {
                 if (parsed.command.all { it.isDigit() }) {
-                    emitServerMessage("server", parsed.trailing.orEmpty().ifBlank { raw })
+                    emitServerMessage("server", parsed.trailing.orEmpty().ifBlank { raw }, timestamp)
                 }
             }
         }
@@ -230,16 +231,21 @@ class IrcClient {
         return if (sender.isNotBlank()) sender else "server"
     }
 
-    private fun emitServerMessage(target: String, body: String) {
+    private fun emitServerMessage(target: String, body: String, timestamp: Instant = Instant.now()) {
         _messages.tryEmit(
             IrcMessage(
                 id = idCounter.incrementAndGet(),
-                timestamp = Instant.now(),
+                timestamp = timestamp,
                 sender = "server",
                 target = target,
                 body = body,
                 isNotice = true
             )
         )
+    }
+
+    private fun parseServerTime(line: IrcLine): Instant? {
+        val tag = line.tags["time"] ?: return null
+        return runCatching { Instant.parse(tag) }.getOrNull()
     }
 }

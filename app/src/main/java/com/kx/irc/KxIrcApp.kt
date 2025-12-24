@@ -262,7 +262,8 @@ private fun MessageList(viewModel: IrcViewModel) {
                 text = formatMessageLine(message),
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                overflow = TextOverflow.Clip,
+                softWrap = false,
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
             )
         }

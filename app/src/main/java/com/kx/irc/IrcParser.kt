@@ -2,6 +2,7 @@ package com.kx.irc
 
 data class IrcLine(
     val raw: String,
+    val tags: Map<String, String?>,
     val prefix: String?,
     val command: String,
     val params: List<String>,
@@ -10,6 +11,14 @@ data class IrcLine(
 
 fun parseIrcLine(line: String): IrcLine {
     var working = line
+    var tags: Map<String, String?> = emptyMap()
+    if (working.startsWith("@")) {
+        val end = working.indexOf(' ')
+        if (end > 0) {
+            tags = parseTags(working.substring(1, end))
+            working = working.substring(end + 1)
+        }
+    }
     var prefix: String? = null
     if (working.startsWith(":")) {
         val end = working.indexOf(' ')
@@ -34,6 +43,7 @@ fun parseIrcLine(line: String): IrcLine {
 
     return IrcLine(
         raw = line,
+        tags = tags,
         prefix = prefix,
         command = command,
         params = params,
@@ -45,4 +55,15 @@ fun parseNick(prefix: String?): String {
     if (prefix == null) return ""
     val end = prefix.indexOf('!')
     return if (end > 0) prefix.substring(0, end) else prefix
+}
+
+private fun parseTags(tagSection: String): Map<String, String?> {
+    if (tagSection.isBlank()) return emptyMap()
+    return tagSection.split(';').mapNotNull { tag ->
+        if (tag.isBlank()) return@mapNotNull null
+        val parts = tag.split('=', limit = 2)
+        val key = parts[0]
+        val value = if (parts.size > 1) parts[1] else null
+        key to value
+    }.toMap()
 }

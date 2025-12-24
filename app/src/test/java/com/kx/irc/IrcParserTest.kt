@@ -21,4 +21,15 @@ class IrcParserTest {
         assertEquals("server", parseNick("server"))
         assertEquals("", parseNick(null))
     }
+
+    @Test
+    fun parseIrcLineWithTags() {
+        val line = "@time=2025-12-24T22:17:06Z :nick!u@h PRIVMSG #chan :hello"
+        val parsed = parseIrcLine(line)
+
+        assertEquals("2025-12-24T22:17:06Z", parsed.tags["time"])
+        assertEquals("PRIVMSG", parsed.command)
+        assertEquals(listOf("#chan"), parsed.params)
+        assertEquals("hello", parsed.trailing)
+    }
 }
