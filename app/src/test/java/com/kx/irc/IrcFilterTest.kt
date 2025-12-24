@@ -24,4 +24,11 @@ class IrcFilterTest {
 
         assertEquals(listOf(messages[0]), filterMessagesByTarget(messages, "#one"))
     }
+
+    @Test
+    fun classifyTargetKinds() {
+        assertEquals(TargetKind.CHANNEL, classifyTarget("#chan"))
+        assertEquals(TargetKind.PRIVATE, classifyTarget("alice"))
+        assertEquals(TargetKind.SERVER, classifyTarget("server"))
+    }
 }

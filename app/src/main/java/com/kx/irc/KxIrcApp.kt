@@ -1,7 +1,10 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
 package com.kx.irc
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,15 +15,24 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,58 +47,83 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.view.KeyEvent
+import kotlinx.coroutines.launch
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.runtime.rememberCoroutineScope
 
 @Composable
 fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
     KxIrcTheme {
-        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
-                    .imePadding()
-                    .testTag("contentList"),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                item { Header(viewModel) }
-                item { ConnectionForm(viewModel) }
-                item { HorizontalDivider() }
-                item { TargetRow(viewModel) }
-                item { MessageList(viewModel) }
-                item { MessageComposer(viewModel) }
+        val drawerState = rememberDrawerState(DrawerValue.Closed)
+        val scope = rememberCoroutineScope()
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = {
+                DrawerContent(
+                    viewModel = viewModel,
+                    onSelect = {
+                        viewModel.setTarget(it)
+                        scope.launch { drawerState.close() }
+                    }
+                )
+            }
+        ) {
+            Scaffold(
+                topBar = {
+                    Header(
+                        viewModel = viewModel,
+                        onMenu = { scope.launch { drawerState.open() } }
+                    )
+                }
+            ) { padding ->
+                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(padding)
+                            .padding(16.dp)
+                            .imePadding()
+                            .testTag("contentList"),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        item { ConnectionForm(viewModel) }
+                        item { HorizontalDivider() }
+                        item { MessageList(viewModel) }
+                        item { MessageComposer(viewModel) }
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun Header(viewModel: IrcViewModel) {
+private fun Header(viewModel: IrcViewModel, onMenu: () -> Unit) {
     val status = viewModel.status
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column {
-            Text("KX IRC", style = MaterialTheme.typography.titleLarge)
-            Text(
-                text = when (status) {
-                    is ConnectionStatus.Connected -> "Connected to ${status.server}"
-                    is ConnectionStatus.Connecting -> "Connecting..."
-                    is ConnectionStatus.Failed -> "Failed: ${status.reason}"
-                    ConnectionStatus.Disconnected -> "Disconnected"
-                },
-                style = MaterialTheme.typography.bodyMedium
-            )
-        }
-        val isConnected = status is ConnectionStatus.Connected || status is ConnectionStatus.Connecting
-        Button(
-            onClick = { if (isConnected) viewModel.disconnect() else viewModel.connect() },
-            modifier = Modifier.testTag("connectButton").widthIn(min = 120.dp)
-        ) {
-            Text(if (isConnected) "Disconnect" else "Connect")
-        }
+    val network = when (status) {
+        is ConnectionStatus.Connected -> status.server
+        is ConnectionStatus.Connecting -> "${viewModel.config.host}:${viewModel.config.port}"
+        is ConnectionStatus.Failed -> "${viewModel.config.host}:${viewModel.config.port}"
+        ConnectionStatus.Disconnected -> viewModel.config.host.ifBlank { "KX IRC" }
     }
+    TopAppBar(
+        title = { Text(network, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        navigationIcon = {
+            IconButton(onClick = onMenu, modifier = Modifier.testTag("menuButton")) {
+                Icon(Icons.Filled.Menu, contentDescription = "Menu")
+            }
+        },
+        actions = {
+            val isConnected = status is ConnectionStatus.Connected || status is ConnectionStatus.Connecting
+            Button(
+                onClick = { if (isConnected) viewModel.disconnect() else viewModel.connect() },
+                modifier = Modifier.testTag("connectButton").widthIn(min = 120.dp)
+            ) {
+                Text(if (isConnected) "Disconnect" else "Connect")
+            }
+        }
+    )
 }
 
 @Composable
@@ -162,22 +199,15 @@ private fun ConnectionForm(viewModel: IrcViewModel) {
 }
 
 @Composable
-private fun TargetRow(viewModel: IrcViewModel) {
-    val targets = viewModel.targets
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.testTag("targetsRow")) {
-        items(targets) { target ->
-            val label = if (target == "*") "All" else target
-            Button(onClick = { viewModel.setTarget(target) }) {
-                Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-        }
-    }
-}
-
-@Composable
 private fun MessageList(viewModel: IrcViewModel) {
     val messages = viewModel.visibleMessages()
-    LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(min = 240.dp, max = 420.dp).testTag("messageList")) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 240.dp, max = 420.dp)
+            .testTag("messageList"),
+        contentPadding = PaddingValues(bottom = 8.dp)
+    ) {
         items(messages, key = { it.id }) { message ->
             Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text(
@@ -230,6 +260,36 @@ private fun MessageComposer(viewModel: IrcViewModel) {
             modifier = Modifier.testTag("sendButton")
         ) {
             Text("Send")
+        }
+    }
+}
+
+@Composable
+private fun DrawerContent(viewModel: IrcViewModel, onSelect: (String) -> Unit) {
+    ModalDrawerSheet(modifier = Modifier.testTag("drawer")) {
+        Text("Channels", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp))
+        viewModel.channelTargets().forEach { entry ->
+            NavigationDrawerItem(
+                label = { Text(entry.name) },
+                selected = entry.name == viewModel.currentTarget,
+                onClick = { onSelect(entry.name) }
+            )
+        }
+        Text("Private", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp))
+        viewModel.privateTargets().forEach { entry ->
+            NavigationDrawerItem(
+                label = { Text(entry.name) },
+                selected = entry.name == viewModel.currentTarget,
+                onClick = { onSelect(entry.name) }
+            )
+        }
+        Text("Server", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp))
+        viewModel.serverTargets().forEach { entry ->
+            NavigationDrawerItem(
+                label = { Text(entry.name) },
+                selected = entry.name == viewModel.currentTarget,
+                onClick = { onSelect(entry.name) }
+            )
         }
     }
 }

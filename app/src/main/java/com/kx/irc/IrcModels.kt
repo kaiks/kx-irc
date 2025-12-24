@@ -29,6 +29,8 @@ data class IrcMessage(
     val isNotice: Boolean = false
 )
 
+enum class TargetKind { SERVER, CHANNEL, PRIVATE }
+
 fun IrcConfig.toAuthPassword(): String {
     return serverPassword
 }
@@ -47,4 +49,12 @@ fun IrcConfig.validate(): String? {
 fun filterMessagesByTarget(messages: List<IrcMessage>, target: String): List<IrcMessage> {
     if (target.isBlank() || target == "*") return messages
     return messages.filter { it.target.equals(target, ignoreCase = true) }
+}
+
+fun classifyTarget(name: String): TargetKind {
+    if (name.equals("server", ignoreCase = true)) return TargetKind.SERVER
+    if (name.startsWith("#") || name.startsWith("&") || name.startsWith("+") || name.startsWith("!")) {
+        return TargetKind.CHANNEL
+    }
+    return TargetKind.PRIVATE
 }

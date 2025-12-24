@@ -18,14 +18,14 @@ class IrcViewModel : ViewModel() {
     var status by mutableStateOf<ConnectionStatus>(ConnectionStatus.Disconnected)
         private set
 
-    var currentTarget by mutableStateOf("")
+    var currentTarget by mutableStateOf("server")
         private set
 
     val messages = mutableStateListOf<IrcMessage>()
-    val targets = mutableStateListOf<String>()
+    private val targetMeta = mutableStateListOf<TargetEntry>()
 
     init {
-        targets.add("*")
+        ensureTarget("server")
         viewModelScope.launch {
             client.status.collectLatest { status = it }
         }
@@ -50,7 +50,7 @@ class IrcViewModel : ViewModel() {
         syncTargetsFromConfig()
         client.connect(config)
         if (currentTarget.isBlank()) {
-            currentTarget = config.channelList().firstOrNull() ?: "*"
+            currentTarget = "server"
         }
     }
 
@@ -69,22 +69,45 @@ class IrcViewModel : ViewModel() {
     fun visibleMessages(): List<IrcMessage> =
         filterMessagesByTarget(messages, currentTarget)
 
+    fun channelTargets(): List<TargetEntry> =
+        targetMeta.filter { it.kind == TargetKind.CHANNEL }.sortedByDescending { it.lastActivity }
+
+    fun privateTargets(): List<TargetEntry> =
+        targetMeta.filter { it.kind == TargetKind.PRIVATE }.sortedByDescending { it.lastActivity }
+
+    fun serverTargets(): List<TargetEntry> =
+        targetMeta.filter { it.kind == TargetKind.SERVER }.sortedByDescending { it.lastActivity }
+
     override fun onCleared() {
         client.shutdown()
     }
 
     private fun ensureTargetForMessage(message: IrcMessage) {
-        val derived = if (message.target.startsWith("#")) message.target else message.sender
-        if (derived.isNotBlank() && !targets.contains(derived)) {
-            targets.add(derived)
-        }
+        val derived = message.target.ifBlank { "server" }
+        ensureTarget(derived)
     }
 
     private fun syncTargetsFromConfig() {
         val configured = config.channelList()
         if (configured.isEmpty()) return
-        configured.forEach {
-            if (!targets.contains(it)) targets.add(it)
+        configured.forEach { ensureTarget(it) }
+    }
+
+    private fun ensureTarget(name: String) {
+        val key = name.ifBlank { "server" }
+        val kind = classifyTarget(key)
+        val now = System.currentTimeMillis()
+        val index = targetMeta.indexOfFirst { it.name == key }
+        if (index == -1) {
+            targetMeta.add(TargetEntry(key, kind, now))
+        } else {
+            targetMeta[index] = targetMeta[index].copy(lastActivity = now)
         }
     }
 }
+
+data class TargetEntry(
+    val name: String,
+    val kind: TargetKind,
+    val lastActivity: Long
+)

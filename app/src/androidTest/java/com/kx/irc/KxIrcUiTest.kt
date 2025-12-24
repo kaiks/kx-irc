@@ -51,4 +51,10 @@ class KxIrcUiTest {
 
         rule.onNodeWithTag("messageList").assertIsDisplayed()
     }
+
+    @Test
+    fun menuOpensDrawer() {
+        rule.onNodeWithTag("menuButton").performClick()
+        rule.onNodeWithTag("drawer").assertIsDisplayed()
+    }
 }
