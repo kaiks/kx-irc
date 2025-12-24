@@ -30,7 +30,7 @@ class KxIrcUiTest {
 
     @Test
     fun canScrollSettingsToReachChannels() {
-        rule.onNodeWithTag("settingsScroll")
+        rule.onNodeWithTag("contentList")
             .performScrollToNode(hasTestTag("channelsField"))
         rule.onNodeWithTag("channelsField").assertIsDisplayed()
     }

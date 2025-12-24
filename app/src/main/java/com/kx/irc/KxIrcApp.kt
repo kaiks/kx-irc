@@ -10,8 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -41,18 +40,20 @@ import android.view.KeyEvent
 fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
     KxIrcTheme {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(modifier = Modifier.fillMaxSize().padding(16.dp).imePadding()) {
-                Header(viewModel)
-                Spacer(modifier = Modifier.height(12.dp))
-                ConnectionForm(viewModel)
-                Spacer(modifier = Modifier.height(12.dp))
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(12.dp))
-                TargetRow(viewModel)
-                Spacer(modifier = Modifier.height(8.dp))
-                MessageList(viewModel)
-                Spacer(modifier = Modifier.height(12.dp))
-                MessageComposer(viewModel)
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+                    .imePadding()
+                    .testTag("contentList"),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                item { Header(viewModel) }
+                item { ConnectionForm(viewModel) }
+                item { HorizontalDivider() }
+                item { TargetRow(viewModel) }
+                item { MessageList(viewModel) }
+                item { MessageComposer(viewModel) }
             }
         }
     }
@@ -81,7 +82,7 @@ private fun Header(viewModel: IrcViewModel) {
         val isConnected = status is ConnectionStatus.Connected || status is ConnectionStatus.Connecting
         Button(
             onClick = { if (isConnected) viewModel.disconnect() else viewModel.connect() },
-            modifier = Modifier.testTag("connectButton")
+            modifier = Modifier.testTag("connectButton").widthIn(min = 120.dp)
         ) {
             Text(if (isConnected) "Disconnect" else "Connect")
         }
@@ -94,8 +95,6 @@ private fun ConnectionForm(viewModel: IrcViewModel) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(max = 320.dp)
-            .verticalScroll(rememberScrollState())
             .testTag("settingsScroll"),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
