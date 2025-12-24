@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -302,6 +303,7 @@ private fun MessageComposer(viewModel: IrcViewModel) {
     var message by remember { mutableStateOf("") }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    val clipboardManager = LocalClipboardManager.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
             value = message,
@@ -321,16 +323,31 @@ private fun MessageComposer(viewModel: IrcViewModel) {
             },
             singleLine = true
         )
-        Button(
-            onClick = {
-                viewModel.sendMessage(message)
-                message = ""
-                focusManager.clearFocus()
-                keyboardController?.hide()
-            },
-            modifier = Modifier.testTag("sendButton")
-        ) {
-            Text("Send")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = {
+                    viewModel.sendMessage(message)
+                    message = ""
+                    focusManager.clearFocus()
+                    keyboardController?.hide()
+                },
+                modifier = Modifier.testTag("sendButton")
+            ) {
+                Text("Send")
+            }
+            Button(
+                onClick = {
+                    val lines = viewModel.visibleMessages().takeLast(50).joinToString("\n") {
+                        formatMessageLine(it).text
+                    }
+                    if (lines.isNotBlank()) {
+                        clipboardManager.setText(AnnotatedString(lines))
+                    }
+                },
+                modifier = Modifier.testTag("copyLastButton")
+            ) {
+                Text("Copy last")
+            }
         }
     }
 }
