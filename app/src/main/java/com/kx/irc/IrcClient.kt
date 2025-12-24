@@ -56,9 +56,9 @@ class IrcClient {
                 welcomed = false
                 currentNick = config.nick.ifBlank { "android" }
                 val password = config.toAuthPassword()
-                if (password.isNotBlank()) sendRaw("PASS $password")
-                sendRaw("NICK $currentNick")
-                sendRaw("USER ${config.username.ifBlank { "android" }} 0 * :${config.realName.ifBlank { "KX IRC" }}")
+                if (password.isNotBlank()) writeLine("PASS $password")
+                writeLine("NICK $currentNick")
+                writeLine("USER ${config.username.ifBlank { "android" }} 0 * :${config.realName.ifBlank { "KX IRC" }}")
 
                 var line: String?
                 while (reader.readLine().also { line = it } != null) {
@@ -79,7 +79,7 @@ class IrcClient {
     private fun handleLine(raw: String, config: IrcConfig) {
         val parsed = parseIrcLine(raw)
         when (parsed.command.uppercase()) {
-            "PING" -> sendRaw("PONG :${parsed.trailing ?: parsed.params.firstOrNull().orEmpty()}")
+            "PING" -> writeLine("PONG :${parsed.trailing ?: parsed.params.firstOrNull().orEmpty()}")
             "001" -> {
                 if (!welcomed) {
                     welcomed = true
@@ -87,7 +87,7 @@ class IrcClient {
                     _status.value = ConnectionStatus.Connected("${config.host}:${config.port}")
                     _events.tryEmit("Connected to ${config.host}")
                 }
-                config.channelList().forEach { sendRaw("JOIN $it") }
+                config.channelList().forEach { writeLine("JOIN $it") }
             }
             "PRIVMSG", "NOTICE" -> {
                 val sender = parseNick(parsed.prefix)
@@ -164,28 +164,34 @@ class IrcClient {
 
     fun sendMessage(target: String, message: String) {
         if (target.isBlank() || target.equals("server", ignoreCase = true) || message.isBlank()) return
-        sendRaw("PRIVMSG $target :$message")
-        _messages.tryEmit(
-            IrcMessage(
-                id = idCounter.incrementAndGet(),
-                timestamp = Instant.now(),
-                sender = "me",
-                target = target,
-                body = message,
-                isNotice = false
-            )
-        )
+        scope.launch {
+            val ok = writeLine("PRIVMSG $target :$message")
+            if (ok) {
+                _messages.tryEmit(
+                    IrcMessage(
+                        id = idCounter.incrementAndGet(),
+                        timestamp = Instant.now(),
+                        sender = "me",
+                        target = target,
+                        body = message,
+                        isNotice = false
+                    )
+                )
+            } else {
+                emitServerMessage("server", "Failed to send message")
+            }
+        }
     }
 
-    fun sendRaw(line: String) {
-        try {
-            writer?.apply {
-                write(line)
-                write("\r\n")
-                flush()
-            }
+    private fun writeLine(line: String): Boolean {
+        val current = writer ?: return false
+        return try {
+            current.write(line)
+            current.write("\r\n")
+            current.flush()
+            true
         } catch (_: Exception) {
-            // Ignore send errors; reader loop will handle disconnects.
+            false
         }
     }
 
