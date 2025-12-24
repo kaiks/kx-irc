@@ -72,6 +72,7 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
         LaunchedEffect(Unit) {
             viewModel.replaceConfig(store.load())
         }
+        var showSettings by remember { mutableStateOf(true) }
         val drawerState = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
         ModalNavigationDrawer(
@@ -83,7 +84,11 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
                         viewModel.setTarget(it)
                         scope.launch { drawerState.close() }
                     },
-                    onClose = { scope.launch { drawerState.close() } }
+                    onClose = { scope.launch { drawerState.close() } },
+                    onOpenSettings = {
+                        showSettings = true
+                        scope.launch { drawerState.close() }
+                    }
                 )
             }
         ) {
@@ -95,25 +100,41 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
                         onConnect = {
                             store.save(viewModel.config)
                             viewModel.connect()
+                            showSettings = false
                         },
-                        onDisconnect = { viewModel.disconnect() }
+                        onDisconnect = {
+                            viewModel.disconnect()
+                            showSettings = true
+                        }
                     )
                 }
             ) { padding ->
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(padding)
-                            .padding(16.dp)
-                            .imePadding()
-                            .testTag("contentList"),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        item { ConnectionForm(viewModel) }
-                        item { HorizontalDivider() }
-                        item { MessageList(viewModel) }
-                        item { MessageComposer(viewModel) }
+                    if (showSettings) {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(padding)
+                                .padding(16.dp)
+                                .imePadding()
+                                .testTag("settingsList"),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            item { ConnectionForm(viewModel) }
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(padding)
+                                .padding(16.dp)
+                                .imePadding()
+                                .testTag("contentList"),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            item { MessageList(viewModel) }
+                            item { MessageComposer(viewModel) }
+                        }
                     }
                 }
             }
@@ -312,7 +333,12 @@ private fun MessageComposer(viewModel: IrcViewModel) {
 }
 
 @Composable
-private fun DrawerContent(viewModel: IrcViewModel, onSelect: (String) -> Unit, onClose: () -> Unit) {
+private fun DrawerContent(
+    viewModel: IrcViewModel,
+    onSelect: (String) -> Unit,
+    onClose: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
     ModalDrawerSheet(modifier = Modifier.testTag("drawer")) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -324,6 +350,12 @@ private fun DrawerContent(viewModel: IrcViewModel, onSelect: (String) -> Unit, o
                 Icon(Icons.Filled.Close, contentDescription = "Close")
             }
         }
+        NavigationDrawerItem(
+            label = { Text("Connection settings") },
+            selected = false,
+            onClick = onOpenSettings,
+            modifier = Modifier.testTag("settingsItem")
+        )
         viewModel.channelTargets().forEach { entry ->
             NavigationDrawerItem(
                 label = { Text(entry.name) },
