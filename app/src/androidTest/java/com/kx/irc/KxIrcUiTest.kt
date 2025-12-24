@@ -45,6 +45,8 @@ class KxIrcUiTest {
 
     @Test
     fun canSendLocalMessageWithoutConnection() {
+        rule.onNodeWithTag("contentList")
+            .performScrollToNode(hasTestTag("messageField"))
         rule.onNodeWithTag("messageField").performTextInput("hello")
         rule.onNodeWithTag("sendButton").performClick()
 
