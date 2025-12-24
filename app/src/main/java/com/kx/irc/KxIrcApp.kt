@@ -82,6 +82,7 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
                     viewModel = viewModel,
                     onSelect = {
                         viewModel.setTarget(it)
+                        showSettings = false
                         scope.launch { drawerState.close() }
                     },
                     onClose = { scope.launch { drawerState.close() } },
@@ -156,8 +157,10 @@ private fun Header(
         is ConnectionStatus.Failed -> "${viewModel.config.host}:${viewModel.config.port}"
         ConnectionStatus.Disconnected -> viewModel.config.host.ifBlank { "KX IRC" }
     }
+    val targetLabel = viewModel.currentTarget.ifBlank { "server" }
+    val title = "$targetLabel — $network"
     TopAppBar(
-        title = { Text(network, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         navigationIcon = {
             IconButton(onClick = onMenu, modifier = Modifier.testTag("menuButton")) {
                 Icon(Icons.Filled.Menu, contentDescription = "Menu")
@@ -350,12 +353,6 @@ private fun DrawerContent(
                 Icon(Icons.Filled.Close, contentDescription = "Close")
             }
         }
-        NavigationDrawerItem(
-            label = { Text("Connection settings") },
-            selected = false,
-            onClick = onOpenSettings,
-            modifier = Modifier.testTag("settingsItem")
-        )
         viewModel.channelTargets().forEach { entry ->
             NavigationDrawerItem(
                 label = { Text(entry.name) },
@@ -379,6 +376,13 @@ private fun DrawerContent(
                 onClick = { onSelect(entry.name) }
             )
         }
+        Text("Settings", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp))
+        NavigationDrawerItem(
+            label = { Text("Connection settings") },
+            selected = false,
+            onClick = onOpenSettings,
+            modifier = Modifier.testTag("settingsItem")
+        )
     }
 }
 

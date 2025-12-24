@@ -35,6 +35,8 @@ class IrcClient {
     private var writer: BufferedWriter? = null
     private var welcomed = false
     private var currentNick: String = ""
+    private var capNegotiating = false
+    private var capBuffer: MutableSet<String> = mutableSetOf()
 
     fun connect(config: IrcConfig) {
         if (_status.value is ConnectionStatus.Connecting || _status.value is ConnectionStatus.Connected) return
@@ -54,6 +56,7 @@ class IrcClient {
                 writer = BufferedWriter(OutputStreamWriter(newSocket.getOutputStream()))
 
                 welcomed = false
+                startCapNegotiation()
                 currentNick = config.nick.ifBlank { "android" }
                 val password = config.toAuthPassword()
                 if (password.isNotBlank()) writeLine("PASS $password")
@@ -80,6 +83,7 @@ class IrcClient {
         val parsed = parseIrcLine(raw)
         val timestamp = parseServerTime(parsed) ?: Instant.now()
         when (parsed.command.uppercase()) {
+            "CAP" -> handleCap(parsed)
             "PING" -> writeLine("PONG :${parsed.trailing ?: parsed.params.firstOrNull().orEmpty()}")
             "001" -> {
                 if (!welcomed) {
@@ -247,5 +251,52 @@ class IrcClient {
     private fun parseServerTime(line: IrcLine): Instant? {
         val tag = line.tags["time"] ?: return null
         return runCatching { Instant.parse(tag) }.getOrNull()
+            ?: runCatching { java.time.OffsetDateTime.parse(tag).toInstant() }.getOrNull()
+            ?: runCatching { java.time.LocalDateTime.parse(tag).toInstant(java.time.ZoneOffset.UTC) }.getOrNull()
+    }
+
+    private fun startCapNegotiation() {
+        capNegotiating = true
+        capBuffer.clear()
+        writeLine("CAP LS 302")
+    }
+
+    private fun handleCap(line: IrcLine) {
+        if (line.params.size < 2) return
+        val subcommand = line.params[1].uppercase()
+        val caps = parseCapList(line)
+        when (subcommand) {
+            "LS" -> {
+                capBuffer.addAll(caps)
+                val isPartial = line.params.getOrNull(2) == "*"
+                if (!isPartial) {
+                    val requested = listOf(
+                        "server-time",
+                        "znc.in/server-time-iso",
+                        "znc.in/server-time"
+                    ).filter { capBuffer.contains(it) }
+                    if (requested.isNotEmpty()) {
+                        writeLine("CAP REQ :${requested.joinToString(" ")}")
+                    } else {
+                        writeLine("CAP END")
+                        capNegotiating = false
+                    }
+                    capBuffer.clear()
+                }
+            }
+            "ACK", "NAK" -> {
+                if (capNegotiating) {
+                    writeLine("CAP END")
+                    capNegotiating = false
+                }
+            }
+        }
+    }
+
+    private fun parseCapList(line: IrcLine): List<String> {
+        val rawList = line.trailing ?: line.params.drop(2).joinToString(" ")
+        return rawList.split(' ')
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
     }
 }
