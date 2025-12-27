@@ -79,7 +79,7 @@ class IrcClient {
         }
     }
 
-    private fun handleLine(raw: String, config: IrcConfig) {
+    private suspend fun handleLine(raw: String, config: IrcConfig) {
         val parsed = parseIrcLine(raw)
         val timestamp = parseServerTime(parsed) ?: Instant.now()
         when (parsed.command.uppercase()) {
@@ -90,7 +90,7 @@ class IrcClient {
                     welcomed = true
                     currentNick = parsed.params.firstOrNull().orEmpty().ifBlank { currentNick }
                     _status.value = ConnectionStatus.Connected("${config.host}:${config.port}")
-                    _events.tryEmit("Connected to ${config.host}")
+                    _events.emit("Connected to ${config.host}")
                 }
                 config.channelList().forEach { writeLine("JOIN $it") }
             }
@@ -99,7 +99,7 @@ class IrcClient {
                 val target = parsed.params.firstOrNull().orEmpty()
                 val resolvedTarget = resolveTarget(target, sender)
                 val body = parsed.trailing.orEmpty()
-                _messages.tryEmit(
+                _messages.emit(
                     IrcMessage(
                         id = idCounter.incrementAndGet(),
                         timestamp = timestamp,
@@ -114,7 +114,7 @@ class IrcClient {
                 val sender = parseNick(parsed.prefix)
                 val channel = parsed.trailing ?: parsed.params.firstOrNull().orEmpty()
                 if (channel.isNotBlank()) {
-                    _messages.tryEmit(
+                    _messages.emit(
                         IrcMessage(
                             id = idCounter.incrementAndGet(),
                             timestamp = timestamp,
@@ -132,7 +132,7 @@ class IrcClient {
                 val reason = parsed.trailing
                 if (channel.isNotBlank()) {
                     val body = if (reason.isNullOrBlank()) "* $sender left" else "* $sender left ($reason)"
-                    _messages.tryEmit(
+                    _messages.emit(
                         IrcMessage(
                             id = idCounter.incrementAndGet(),
                             timestamp = timestamp,
@@ -172,7 +172,7 @@ class IrcClient {
         scope.launch {
             val ok = writeLine("PRIVMSG $target :$message")
             if (ok) {
-                _messages.tryEmit(
+                _messages.emit(
                     IrcMessage(
                         id = idCounter.incrementAndGet(),
                         timestamp = Instant.now(),
@@ -235,8 +235,8 @@ class IrcClient {
         return if (sender.isNotBlank()) sender else "server"
     }
 
-    private fun emitServerMessage(target: String, body: String, timestamp: Instant = Instant.now()) {
-        _messages.tryEmit(
+    private suspend fun emitServerMessage(target: String, body: String, timestamp: Instant = Instant.now()) {
+        _messages.emit(
             IrcMessage(
                 id = idCounter.incrementAndGet(),
                 timestamp = timestamp,

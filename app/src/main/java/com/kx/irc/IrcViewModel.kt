@@ -30,7 +30,7 @@ class IrcViewModel : ViewModel() {
             client.status.collectLatest { status = it }
         }
         viewModelScope.launch {
-            client.messages.collectLatest { message ->
+            client.messages.collect { message ->
                 messages.add(message)
                 ensureTargetForMessage(message)
             }
