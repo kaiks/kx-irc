@@ -51,6 +51,7 @@ class IrcViewModel : ViewModel() {
             status = ConnectionStatus.Failed(error)
             return
         }
+        messages.clear()
         syncTargetsFromConfig()
         client.connect(config)
         currentTarget = preferredTargetAfterConnect()
