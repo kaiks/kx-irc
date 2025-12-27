@@ -38,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -73,7 +74,7 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
         LaunchedEffect(Unit) {
             viewModel.replaceConfig(store.load())
         }
-        var showSettings by remember { mutableStateOf(true) }
+        var showSettings by rememberSaveable { mutableStateOf(true) }
         val drawerState = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
         ModalNavigationDrawer(
@@ -285,14 +286,14 @@ private fun MessageList(viewModel: IrcViewModel) {
     ) {
         items(messages, key = { it.id }) { message ->
             SelectionContainer {
-                Text(
-                    text = formatMessageLine(message),
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Clip,
-                    softWrap = false,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                )
+            Text(
+                text = formatMessageLine(message),
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = Int.MAX_VALUE,
+                overflow = TextOverflow.Clip,
+                softWrap = true,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            )
             }
         }
     }
