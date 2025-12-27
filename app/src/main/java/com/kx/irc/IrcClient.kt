@@ -98,7 +98,7 @@ class IrcClient {
                 val sender = parseNick(parsed.prefix)
                 val target = parsed.params.firstOrNull().orEmpty()
                 val resolvedTarget = resolveTarget(target, sender)
-                val body = parsed.trailing.orEmpty()
+                val body = parsed.trailing ?: parsed.params.drop(1).joinToString(" ")
                 _messages.emit(
                     IrcMessage(
                         id = idCounter.incrementAndGet(),
