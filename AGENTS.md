@@ -18,6 +18,8 @@ Build a minimal Android IRC client (ZNC-friendly) that is reliable, readable, an
 - Keep dependencies minimal and stable.
 - When adding UI or behavior changes, also update tests.
 - Run `./gradlew test assembleDebug` for changes; run `./gradlew connectedAndroidTest` when UI tests are updated.
+- Never run instrumentation tests on a physical phone by default. Use emulator-only execution for `connectedAndroidTest`.
+- Before running `connectedAndroidTest`, check `adb devices` and if any non-emulator device is connected, ask for confirmation before proceeding.
 - If a change introduces friction for the emulator (scrolling, IME, etc.), add test tags and stabilize tests.
 
 ## Debugging guidelines
