@@ -360,9 +360,9 @@ private fun MessageList(viewModel: IrcViewModel, modifier: Modifier = Modifier) 
                     style = MaterialTheme.typography.bodyMedium.copy(
                         color = MaterialTheme.colorScheme.onBackground
                     ),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    softWrap = false,
+                    maxLines = Int.MAX_VALUE,
+                    overflow = TextOverflow.Clip,
+                    softWrap = true,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     onClick = { offset ->
                         val annotation = formattedMessage.getStringAnnotations(offset, offset).firstOrNull()
