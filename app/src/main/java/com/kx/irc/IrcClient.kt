@@ -45,8 +45,9 @@ class IrcClient {
     private var activeSession: Session? = null
     private var connectionJob: Job? = null
 
-    fun connect(config: IrcConfig) {
-        if (_status.value is ConnectionStatus.Connecting || _status.value is ConnectionStatus.Connected) return
+    @Synchronized
+    fun connect(config: IrcConfig): Boolean {
+        if (_status.value is ConnectionStatus.Connecting || _status.value is ConnectionStatus.Connected) return false
 
         val session = Session(sessionCounter.incrementAndGet())
         activeSession = session
@@ -99,6 +100,7 @@ class IrcClient {
                 }
             }
         }
+        return true
     }
 
     private fun openSocket(config: IrcConfig): Socket {
@@ -106,11 +108,16 @@ class IrcClient {
 
         val socket = (SSLSocketFactory.getDefault() as SSLSocketFactory)
             .createSocket(config.host, config.port) as SSLSocket
-        socket.sslParameters = SSLParameters().apply {
-            endpointIdentificationAlgorithm = "HTTPS"
+        try {
+            socket.sslParameters = SSLParameters().apply {
+                endpointIdentificationAlgorithm = "HTTPS"
+            }
+            socket.startHandshake()
+            return socket
+        } catch (exception: Exception) {
+            socket.close()
+            throw exception
         }
-        socket.startHandshake()
-        return socket
     }
 
     private suspend fun handleLine(raw: String, config: IrcConfig, session: Session) {
@@ -260,6 +267,7 @@ class IrcClient {
         }
     }
 
+    @Synchronized
     fun disconnect() {
         val session = activeSession
         activeSession = null

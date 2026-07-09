@@ -26,6 +26,8 @@ class IrcViewModel : ViewModel() {
 
     private var caseMapping by mutableStateOf(IrcCaseMapping.RFC1459)
 
+    var connectionGeneration by mutableStateOf(0)
+        private set
     val messages = mutableStateListOf<IrcMessage>()
     private val targetMeta = mutableStateListOf<TargetEntry>()
 
@@ -60,16 +62,37 @@ class IrcViewModel : ViewModel() {
     }
 
     fun connect(): Boolean {
+        return startConnection(clearHistory = true, showValidationError = true)
+    }
+
+    /** Reconnect only after the activity returns to a visible chat screen. */
+    fun reconnectOnForeground(): Boolean {
+        if (!shouldReconnectOnForeground(status, config)) return false
+        return startConnection(clearHistory = false, showValidationError = false)
+    }
+
+    private fun startConnection(clearHistory: Boolean, showValidationError: Boolean): Boolean {
         val error = config.validate()
         if (error != null) {
             status = ConnectionStatus.Failed(error)
-            feedback = error
+            if (showValidationError) feedback = error
             return false
         }
-        messages.clear()
+        if (!client.connect(config)) return false
+
+        // Update immediately so a lifecycle callback cannot schedule a second connection.
+        status = ConnectionStatus.Connecting
+        val previousTarget = currentTarget
+        if (clearHistory) messages.clear()
         syncTargetsFromConfig()
-        client.connect(config)
-        currentTarget = preferredTargetAfterConnect()
+        currentTarget = pickTargetAfterConnect(
+            previousTarget = previousTarget,
+            configuredChannels = config.channelList(),
+            knownChannelTargets = channelTargets().map { it.name },
+            knownPrivateTargets = privateTargets().map { it.name }
+        )
+        ensureTarget(currentTarget)
+        connectionGeneration += 1
         return true
     }
 
@@ -102,14 +125,6 @@ class IrcViewModel : ViewModel() {
 
     fun serverTargets(): List<TargetEntry> =
         targetMeta.filter { it.kind == TargetKind.SERVER }.sortedByDescending { it.lastActivity }
-
-    fun preferredTargetAfterConnect(): String {
-        val channel = channelTargets().firstOrNull()?.name ?: config.channelList().firstOrNull()
-        if (!channel.isNullOrBlank()) return channel
-        val privateTarget = privateTargets().firstOrNull()?.name
-        if (!privateTarget.isNullOrBlank()) return privateTarget
-        return "server"
-    }
 
     fun showFeedback(message: String) {
         feedback = message
@@ -189,3 +204,26 @@ data class TargetEntry(
     val kind: TargetKind,
     val lastActivity: Long
 )
+
+internal fun pickTargetAfterConnect(
+    previousTarget: String,
+    configuredChannels: List<String>,
+    knownChannelTargets: List<String>,
+    knownPrivateTargets: List<String>
+): String {
+    val normalizedPrevious = previousTarget.ifBlank { "server" }
+    if (!normalizedPrevious.equals("server", ignoreCase = true)) return normalizedPrevious
+    configuredChannels.firstOrNull()?.let { return it }
+    knownChannelTargets.firstOrNull()?.let { return it }
+    knownPrivateTargets.firstOrNull()?.let { return it }
+    return "server"
+}
+
+internal fun shouldReconnectOnForeground(
+    status: ConnectionStatus,
+    config: IrcConfig
+): Boolean {
+    val reconnectable = status is ConnectionStatus.Disconnected || status is ConnectionStatus.Failed
+    if (!reconnectable) return false
+    return config.validate() == null
+}

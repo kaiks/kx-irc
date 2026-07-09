@@ -44,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,12 +52,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
@@ -64,6 +67,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import java.time.LocalTime
 import java.time.ZoneId
@@ -76,8 +81,10 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
         val context = LocalContext.current
         val store = remember { ConnectionStore(context) }
         val snackbarHostState = remember { SnackbarHostState() }
+        var configLoaded by remember { mutableStateOf(false) }
         LaunchedEffect(Unit) {
             viewModel.replaceConfig(store.load())
+            configLoaded = true
         }
         val feedback = viewModel.feedback
         LaunchedEffect(feedback) {
@@ -88,6 +95,29 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
         }
 
         var showSettings by rememberSaveable { mutableStateOf(true) }
+        val lifecycleOwner = LocalLifecycleOwner.current
+        val latestChatVisible by rememberUpdatedState(!showSettings)
+        val latestConfigLoaded by rememberUpdatedState(configLoaded)
+        LaunchedEffect(configLoaded) {
+            if (configLoaded && !showSettings) {
+                viewModel.reconnectOnForeground()
+            }
+        }
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (latestConfigLoaded && latestChatVisible) {
+                    when (event) {
+                        Lifecycle.Event.ON_START -> viewModel.reconnectOnForeground()
+                        Lifecycle.Event.ON_STOP -> viewModel.disconnect()
+                        else -> Unit
+                    }
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+            }
+        }
         val drawerState = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
         ModalNavigationDrawer(
@@ -280,9 +310,10 @@ private fun MessageList(viewModel: IrcViewModel, modifier: Modifier = Modifier) 
     val messages = viewModel.visibleMessages()
     val listState = rememberLazyListState()
     val currentTarget = viewModel.currentTarget
-    var shouldAutoScroll by remember(currentTarget) { mutableStateOf(true) }
+    val connectionGeneration = viewModel.connectionGeneration
+    var shouldAutoScroll by remember(currentTarget, connectionGeneration) { mutableStateOf(true) }
 
-    LaunchedEffect(currentTarget) {
+    LaunchedEffect(currentTarget, connectionGeneration) {
         shouldAutoScroll = true
         if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }

@@ -65,6 +65,14 @@ class KxIrcUiTest {
     }
 
     @Test
+    fun inlineSendButtonPresentInComposer() {
+        ensureSettingsVisible()
+        rule.onNodeWithTag("hostField").performTextInput("127.0.0.1")
+        rule.onNodeWithTag("connectButton").performClick()
+        rule.onNodeWithTag("inlineSendButton").assertIsDisplayed()
+    }
+
+    @Test
     fun menuOpensDrawer() {
         rule.onNodeWithTag("menuButton").performClick()
         rule.onNodeWithTag("drawer").assertIsDisplayed()
