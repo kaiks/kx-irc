@@ -44,6 +44,9 @@ class IrcClient {
     private val _currentNick = MutableStateFlow("")
     val currentNick: StateFlow<String> = _currentNick
 
+    private val _channelRosters = MutableSharedFlow<ChannelRosterUpdate>(extraBufferCapacity = 32)
+    val channelRosters: SharedFlow<ChannelRosterUpdate> = _channelRosters
+
     @Volatile
     private var activeSession: Session? = null
     private var connectionJob: Job? = null
@@ -144,6 +147,17 @@ class IrcClient {
                 parseCaseMapping(parsed)?.let { _caseMapping.value = it }
                 emitServerMessage("server", parsed.trailing.orEmpty().ifBlank { raw }, timestamp)
             }
+            "353" -> {
+                val channel = parsed.params.lastOrNull().orEmpty()
+                if (classifyTarget(channel) == TargetKind.CHANNEL) {
+                    if (session.namesInProgress.add(channel)) session.channelMembers[channel] = linkedSetOf()
+                    session.channelMembers.getOrPut(channel) { linkedSetOf() }.addAll(parseChannelNames(parsed.trailing.orEmpty()))
+                }
+            }
+            "366" -> {
+                val channel = parsed.params.lastOrNull().orEmpty()
+                if (session.namesInProgress.remove(channel)) emitRoster(session, channel)
+            }
             "433", "464", "465" -> {
                 val reason = parsed.trailing.orEmpty().ifBlank { "Registration failed (${parsed.command})" }
                 failSession(session, reason)
@@ -178,12 +192,14 @@ class IrcClient {
                     session.currentNick = newNick
                     _currentNick.value = newNick
                 }
+                renameRosterMember(session, sender, newNick)
                 emitServerMessage("server", "* $sender is now known as $newNick", timestamp)
             }
             "JOIN" -> {
                 val sender = parseNick(parsed.prefix)
                 val channel = parsed.trailing ?: parsed.params.firstOrNull().orEmpty()
                 if (channel.isNotBlank()) {
+                    addRosterMember(session, channel, sender)
                     _messages.emit(
                         IrcMessage(
                             id = idCounter.incrementAndGet(),
@@ -200,6 +216,7 @@ class IrcClient {
                 val channel = parsed.params.firstOrNull().orEmpty()
                 val reason = parsed.trailing
                 if (channel.isNotBlank()) {
+                    removeRosterMember(session, channel, sender)
                     val body = if (reason.isNullOrBlank()) "* $sender left" else "* $sender left ($reason)"
                     _messages.emit(
                         IrcMessage(
@@ -224,7 +241,14 @@ class IrcClient {
             "QUIT" -> {
                 val quitSender = parseNick(parsed.prefix)
                 val quitReason = parsed.trailing.orEmpty().ifBlank { raw }
+                removeRosterMemberEverywhere(session, quitSender)
                 emitServerMessage("server", "* $quitSender quit ($quitReason)", timestamp)
+            }
+            "KICK" -> {
+                val channel = parsed.params.firstOrNull().orEmpty()
+                val kickedNick = parsed.params.getOrNull(1).orEmpty()
+                removeRosterMember(session, channel, kickedNick)
+                emitServerMessage(channel.ifBlank { "server" }, "* $kickedNick was kicked", timestamp)
             }
             else -> {
                 if (parsed.command.all { it.isDigit() }) {
@@ -436,6 +460,43 @@ class IrcClient {
         return action.takeIf { body == "${CTCP_DELIMITER}ACTION $it$CTCP_DELIMITER" && it.isNotBlank() }
     }
 
+    private suspend fun addRosterMember(session: Session, channel: String, nick: String) {
+        if (channel.isBlank() || nick.isBlank()) return
+        val roster = session.channelMembers.getOrPut(channel) { linkedSetOf() }
+        val existing = roster.firstOrNull { ircEquals(it, nick, _caseMapping.value) }
+        if (existing != null) roster.remove(existing)
+        roster.add(nick)
+        emitRoster(session, channel)
+    }
+
+    private suspend fun removeRosterMember(session: Session, channel: String, nick: String) {
+        val roster = session.channelMembers[channel] ?: return
+        val removed = roster.removeAll { ircEquals(it, nick, _caseMapping.value) }
+        if (removed) emitRoster(session, channel)
+    }
+
+    private suspend fun removeRosterMemberEverywhere(session: Session, nick: String) {
+        session.channelMembers.keys.toList().forEach { channel -> removeRosterMember(session, channel, nick) }
+    }
+
+    private suspend fun renameRosterMember(session: Session, oldNick: String, newNick: String) {
+        if (newNick.isBlank()) return
+        session.channelMembers.keys.toList().forEach { channel ->
+            val roster = session.channelMembers[channel] ?: return@forEach
+            val existing = roster.firstOrNull { ircEquals(it, oldNick, _caseMapping.value) } ?: return@forEach
+            roster.remove(existing)
+            roster.add(newNick)
+            emitRoster(session, channel)
+        }
+    }
+
+    private suspend fun emitRoster(session: Session, channel: String) {
+        val roster = session.channelMembers[channel] ?: return
+        _channelRosters.emit(
+            ChannelRosterUpdate(channel, roster.sortedBy { ircCaseFold(it, _caseMapping.value) })
+        )
+    }
+
     private suspend fun rememberPendingOutgoing(session: Session, target: String, body: String) {
         session.outgoingMutex.withLock {
             val now = Instant.now()
@@ -476,6 +537,8 @@ class IrcClient {
         var currentNick = ""
         var capNegotiating = false
         val capBuffer = mutableSetOf<String>()
+        val channelMembers = mutableMapOf<String, MutableSet<String>>()
+        val namesInProgress = mutableSetOf<String>()
 
         fun attach(newSocket: Socket) {
             socket = newSocket

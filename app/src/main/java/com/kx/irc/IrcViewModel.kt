@@ -33,6 +33,7 @@ class IrcViewModel : ViewModel() {
     val messages = mutableStateListOf<IrcMessage>()
     private val targetMeta = mutableStateListOf<TargetEntry>()
     private val drafts = mutableStateMapOf<String, String>()
+    private val channelRosters = mutableStateMapOf<String, List<String>>()
 
     init {
         ensureTarget("server")
@@ -50,6 +51,11 @@ class IrcViewModel : ViewModel() {
         }
         viewModelScope.launch {
             client.currentNick.collectLatest { ownNick = it }
+        }
+        viewModelScope.launch {
+            client.channelRosters.collectLatest { update ->
+                channelRosters[draftKey(update.channel)] = update.nicknames
+            }
         }
         viewModelScope.launch {
             client.messages.collect { message ->
@@ -90,6 +96,7 @@ class IrcViewModel : ViewModel() {
         status = ConnectionStatus.Connecting
         val previousTarget = currentTarget
         if (clearHistory) messages.clear()
+        if (clearHistory) channelRosters.clear()
         syncTargetsFromConfig()
         currentTarget = pickTargetAfterConnect(
             previousTarget = previousTarget,
@@ -178,6 +185,13 @@ class IrcViewModel : ViewModel() {
         val key = draftKey(target)
         if (value.isBlank()) drafts.remove(key) else drafts[key] = value
     }
+
+    fun mentionSuggestions(target: String, draft: String): List<String> {
+        if (classifyTarget(target) != TargetKind.CHANNEL) return emptyList()
+        return findMentionSuggestions(draft, channelRosters[draftKey(target)].orEmpty(), ownNick, caseMapping)
+    }
+
+    fun insertMention(draft: String, nick: String): String = insertMentionSuggestion(draft, nick)
 
     fun visibleMessages(): List<IrcMessage> =
         filterMessagesByTarget(messages, currentTarget, caseMapping)

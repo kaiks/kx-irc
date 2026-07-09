@@ -32,6 +32,11 @@ data class IrcMessage(
     val isAction: Boolean = false
 )
 
+data class ChannelRosterUpdate(
+    val channel: String,
+    val nicknames: List<String>
+)
+
 enum class TargetKind { SERVER, CHANNEL, PRIVATE }
 
 fun IrcConfig.toAuthPassword(): String {
@@ -216,6 +221,34 @@ fun isIrcMention(body: String, nick: String, caseMapping: IrcCaseMapping = IrcCa
         index = foldedBody.indexOf(foldedNick, index + 1)
     }
     return false
+}
+
+internal fun parseChannelNames(rawNames: String): List<String> =
+    rawNames.split(' ')
+        .map { it.trimStart('~', '&', '@', '%', '+') }
+        .filter(::isValidIrcNick)
+
+internal fun findMentionSuggestions(
+    draft: String,
+    channelNicknames: List<String>,
+    ownNick: String,
+    caseMapping: IrcCaseMapping = IrcCaseMapping.RFC1459
+): List<String> {
+    val prefix = draft.substringAfterLast(' ').removePrefix("@")
+    if (prefix.length < 2 || prefix.any { !isIrcNickCharacter(it) }) return emptyList()
+    val foldedPrefix = ircCaseFold(prefix, caseMapping)
+    return channelNicknames
+        .asSequence()
+        .filter { !ircEquals(it, ownNick, caseMapping) }
+        .filter { ircCaseFold(it, caseMapping).startsWith(foldedPrefix) }
+        .sortedWith(compareBy<String> { !ircEquals(it, prefix, caseMapping) }.thenBy { ircCaseFold(it, caseMapping) })
+        .take(5)
+        .toList()
+}
+
+internal fun insertMentionSuggestion(draft: String, nick: String): String {
+    val tokenStart = draft.lastIndexOf(' ').let { if (it == -1) 0 else it + 1 }
+    return draft.substring(0, tokenStart) + "@$nick "
 }
 
 private fun configTokenError(label: String, value: String): String? {

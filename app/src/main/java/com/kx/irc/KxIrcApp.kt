@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -23,6 +24,7 @@ import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
@@ -386,6 +388,7 @@ private fun MessageComposer(viewModel: IrcViewModel) {
     val inputEnabled = viewModel.status is ConnectionStatus.Connected
     LaunchedEffect(currentTarget) { message = viewModel.draftFor(currentTarget) }
     val canSend = inputEnabled && message.isNotBlank()
+    val mentionSuggestions = viewModel.mentionSuggestions(currentTarget, message)
     val sendMessage = send@{
         if (!canSend) return@send
         val targetAtSend = currentTarget
@@ -397,6 +400,25 @@ private fun MessageComposer(viewModel: IrcViewModel) {
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (mentionSuggestions.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).testTag("mentionSuggestions"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text("Mention", style = MaterialTheme.typography.labelMedium)
+                mentionSuggestions.forEach { nick ->
+                    TextButton(
+                        onClick = {
+                            message = viewModel.insertMention(message, nick)
+                            viewModel.updateDraft(currentTarget, message)
+                        }
+                    ) {
+                        Text("@$nick")
+                    }
+                }
+            }
+        }
         OutlinedTextField(
             value = message,
             onValueChange = {

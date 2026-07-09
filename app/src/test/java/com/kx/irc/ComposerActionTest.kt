@@ -28,4 +28,13 @@ class ComposerActionTest {
         assertFalse(isIrcMention("kx{users}", "kx{user}"))
         assertFalse(isIrcMention("hello there", "kx{user}"))
     }
+
+    @Test
+    fun nameReplyAndTypedPrefixProduceOptionalMentionSuggestions() {
+        val names = parseChannelNames("@Alice +albert bob")
+
+        assertEquals(listOf("albert", "Alice"), findMentionSuggestions("hello al", names, ownNick = "bob"))
+        assertEquals("hello @Alice ", insertMentionSuggestion("hello al", "Alice"))
+        assertTrue(findMentionSuggestions("hello a", names, ownNick = "bob").isEmpty())
+    }
 }
