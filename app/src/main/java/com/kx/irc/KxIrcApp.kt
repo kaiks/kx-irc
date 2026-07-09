@@ -357,7 +357,9 @@ private fun MessageList(viewModel: IrcViewModel, modifier: Modifier = Modifier) 
                 val formattedMessage = formatMessageLine(message)
                 ClickableText(
                     text = formattedMessage,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        color = MaterialTheme.colorScheme.onBackground
+                    ),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     softWrap = false,
