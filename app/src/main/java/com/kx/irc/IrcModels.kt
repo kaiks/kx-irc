@@ -248,7 +248,7 @@ internal fun findMentionSuggestions(
 
 internal fun insertMentionSuggestion(draft: String, nick: String): String {
     val tokenStart = draft.lastIndexOf(' ').let { if (it == -1) 0 else it + 1 }
-    return draft.substring(0, tokenStart) + "@$nick "
+    return draft.substring(0, tokenStart) + "$nick "
 }
 
 private fun configTokenError(label: String, value: String): String? {

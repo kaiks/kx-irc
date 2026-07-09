@@ -34,7 +34,7 @@ class ComposerActionTest {
         val names = parseChannelNames("@Alice +albert bob")
 
         assertEquals(listOf("albert", "Alice"), findMentionSuggestions("hello al", names, ownNick = "bob"))
-        assertEquals("hello @Alice ", insertMentionSuggestion("hello al", "Alice"))
+        assertEquals("hello Alice ", insertMentionSuggestion("hello al", "Alice"))
         assertTrue(findMentionSuggestions("hello a", names, ownNick = "bob").isEmpty())
     }
 }
