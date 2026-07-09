@@ -28,7 +28,8 @@ data class IrcMessage(
     val sender: String,
     val target: String,
     val body: String,
-    val isNotice: Boolean = false
+    val isNotice: Boolean = false,
+    val isAction: Boolean = false
 )
 
 enum class TargetKind { SERVER, CHANNEL, PRIVATE }
@@ -101,14 +102,17 @@ fun ircCaseFold(value: String, caseMapping: IrcCaseMapping = IrcCaseMapping.RFC1
 fun ircEquals(left: String, right: String, caseMapping: IrcCaseMapping = IrcCaseMapping.RFC1459): Boolean =
     ircCaseFold(left, caseMapping) == ircCaseFold(right, caseMapping)
 
-internal fun splitPrivmsgCommands(target: String, message: String): List<String> {
+internal fun splitPrivmsgCommands(target: String, message: String): List<String> =
+    splitPrivmsgBodies(target, message).map { "PRIVMSG $target :$it" }
+
+internal fun splitPrivmsgBodies(target: String, message: String, reservedBytes: Int = 0): List<String> {
     require(isValidIrcTarget(target)) { "Invalid IRC target" }
     require(message.isNotBlank()) { "Message is required" }
     require(message.none(::isIrcLineBreakOrControl)) { "Messages cannot contain line breaks or control characters" }
 
     val prefix = "PRIVMSG $target :"
     val availableBytes = IRC_MAX_LINE_BYTES - "\r\n".toByteArray(Charsets.UTF_8).size -
-        prefix.toByteArray(Charsets.UTF_8).size
+        prefix.toByteArray(Charsets.UTF_8).size - reservedBytes
     require(availableBytes > 0) { "IRC target is too long" }
 
     val chunks = mutableListOf<String>()
@@ -131,14 +135,88 @@ internal fun splitPrivmsgCommands(target: String, message: String): List<String>
         chunks += message.substring(start, splitAt)
         start = splitAt
     }
-    return chunks.map { "$prefix$it" }
+    return chunks
 }
 
 internal fun isValidIrcTarget(value: String): Boolean =
     value.isNotBlank() && value.none { it.isWhitespace() || isIrcLineBreakOrControl(it) || it == ':' || it == ',' }
 
 internal fun isSafeIrcLine(line: String): Boolean =
-    line.none(::isIrcLineBreakOrControl) && "${line}\r\n".toByteArray(Charsets.UTF_8).size <= IRC_MAX_LINE_BYTES
+    line.none { isIrcLineBreakOrControl(it) && it != CTCP_DELIMITER } &&
+        "${line}\r\n".toByteArray(Charsets.UTF_8).size <= IRC_MAX_LINE_BYTES
+
+internal sealed interface ComposerAction {
+    data class Say(val target: String, val message: String) : ComposerAction
+    data class Action(val target: String, val message: String) : ComposerAction
+    data class Join(val channel: String) : ComposerAction
+    data class Part(val channel: String, val reason: String?) : ComposerAction
+    data class Message(val target: String, val message: String) : ComposerAction
+    data class Nick(val nick: String) : ComposerAction
+    data class Error(val reason: String) : ComposerAction
+}
+
+internal fun parseComposerAction(input: String, currentTarget: String): ComposerAction {
+    if (input.isBlank()) return ComposerAction.Error("Message is required")
+    if (!input.startsWith('/')) {
+        return if (isChatTarget(currentTarget)) ComposerAction.Say(currentTarget, input)
+        else ComposerAction.Error("Select a channel or private conversation first")
+    }
+
+    val commandLine = input.drop(1).trimStart()
+    val command = commandLine.substringBefore(' ').lowercase()
+    val arguments = commandLine.substringAfter(' ', "").trim()
+    return when (command) {
+        "join", "j" -> {
+            if (classifyTarget(arguments) == TargetKind.CHANNEL && isValidIrcTarget(arguments)) {
+                ComposerAction.Join(arguments)
+            } else {
+                ComposerAction.Error("Usage: /join #channel")
+            }
+        }
+        "part", "leave" -> {
+            val first = arguments.substringBefore(' ')
+            val channel = if (classifyTarget(first) == TargetKind.CHANNEL) first else currentTarget
+            val reason = if (channel == first) arguments.substringAfter(' ', "").ifBlank { null } else arguments.ifBlank { null }
+            if (classifyTarget(channel) == TargetKind.CHANNEL && isValidIrcTarget(channel)) {
+                ComposerAction.Part(channel, reason)
+            } else {
+                ComposerAction.Error("Usage: /part [#channel] [reason]")
+            }
+        }
+        "me" -> {
+            if (arguments.isNotBlank() && isChatTarget(currentTarget)) ComposerAction.Action(currentTarget, arguments)
+            else ComposerAction.Error("Usage: /me action")
+        }
+        "msg", "query" -> {
+            val target = arguments.substringBefore(' ')
+            val message = arguments.substringAfter(' ', "")
+            if (isValidIrcTarget(target) && message.isNotBlank()) ComposerAction.Message(target, message)
+            else ComposerAction.Error("Usage: /msg nick message")
+        }
+        "nick" -> {
+            if (isValidIrcNick(arguments)) ComposerAction.Nick(arguments)
+            else ComposerAction.Error("Usage: /nick new-nick")
+        }
+        "help" -> ComposerAction.Error("Commands: /join, /part, /me, /msg, /nick")
+        else -> ComposerAction.Error("Unknown command: /$command")
+    }
+}
+
+fun isIrcMention(body: String, nick: String, caseMapping: IrcCaseMapping = IrcCaseMapping.RFC1459): Boolean {
+    if (nick.isBlank()) return false
+    val foldedBody = ircCaseFold(buildStyledMessage(body).text, caseMapping)
+    val foldedNick = ircCaseFold(nick, caseMapping)
+    var index = foldedBody.indexOf(foldedNick)
+    while (index >= 0) {
+        val before = foldedBody.getOrNull(index - 1)
+        val after = foldedBody.getOrNull(index + foldedNick.length)
+        if ((before == null || !isIrcNickCharacter(before)) && (after == null || !isIrcNickCharacter(after))) {
+            return true
+        }
+        index = foldedBody.indexOf(foldedNick, index + 1)
+    }
+    return false
+}
 
 private fun configTokenError(label: String, value: String): String? {
     if (value.isBlank()) return null
@@ -148,5 +226,15 @@ private fun configTokenError(label: String, value: String): String? {
         null
     }
 }
+
+private fun isChatTarget(target: String): Boolean = target != "*" && classifyTarget(target) != TargetKind.SERVER
+
+private fun isValidIrcNick(value: String): Boolean =
+    value.isNotBlank() && value.none { it.isWhitespace() || isIrcLineBreakOrControl(it) || it == ':' }
+
+private fun isIrcNickCharacter(value: Char): Boolean =
+    value.isLetterOrDigit() || value in "[]\\`_^{|}-"
+
+private const val CTCP_DELIMITER = '\u0001'
 
 private fun isIrcLineBreakOrControl(value: Char): Boolean = value == '\r' || value == '\n' || value.code < 0x20

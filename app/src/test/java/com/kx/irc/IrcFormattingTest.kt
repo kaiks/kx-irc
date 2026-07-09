@@ -26,4 +26,17 @@ class IrcFormattingTest {
     fun unrelatedBracketedTextIsNotRemoved() {
         assertEquals(Pair(null, "[tomorrow] hello"), extractZncTimestamp("[tomorrow] hello"))
     }
+
+    @Test
+    fun messageLineAnnotatesNickAndLinks() {
+        val formatted = formatMessageLine(
+            IrcMessage(1, Instant.EPOCH, "alice", "#android", "See https://example.com/docs.")
+        )
+
+        assertEquals("alice", formatted.getStringAnnotations(NICK_ANNOTATION, 11, 11).single().item)
+        assertEquals(
+            "https://example.com/docs",
+            formatted.getStringAnnotations(LINK_ANNOTATION, formatted.text.indexOf("https"), formatted.text.indexOf("https")).single().item
+        )
+    }
 }

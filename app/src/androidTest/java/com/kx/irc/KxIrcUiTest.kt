@@ -90,6 +90,13 @@ class KxIrcUiTest {
         rule.onNodeWithTag("allMessagesItem").assertIsDisplayed()
     }
 
+    @Test
+    fun drawerOffersJoinChannelAction() {
+        rule.onNodeWithTag("menuButton").performClick()
+        rule.onNodeWithTag("joinChannelItem").performClick()
+        rule.onNodeWithTag("joinChannelField").assertIsDisplayed()
+    }
+
     private fun ensureSettingsVisible() {
         rule.onNodeWithTag("menuButton").performClick()
         rule.onNodeWithTag("settingsItem").performClick()

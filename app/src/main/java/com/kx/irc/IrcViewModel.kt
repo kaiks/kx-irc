@@ -1,6 +1,7 @@
 package com.kx.irc
 
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -25,11 +26,13 @@ class IrcViewModel : ViewModel() {
         private set
 
     private var caseMapping by mutableStateOf(IrcCaseMapping.RFC1459)
+    private var ownNick by mutableStateOf("")
 
     var connectionGeneration by mutableStateOf(0)
         private set
     val messages = mutableStateListOf<IrcMessage>()
     private val targetMeta = mutableStateListOf<TargetEntry>()
+    private val drafts = mutableStateMapOf<String, String>()
 
     init {
         ensureTarget("server")
@@ -44,6 +47,9 @@ class IrcViewModel : ViewModel() {
                 caseMapping = it
                 mergeEquivalentTargets()
             }
+        }
+        viewModelScope.launch {
+            client.currentNick.collectLatest { ownNick = it }
         }
         viewModelScope.launch {
             client.messages.collect { message ->
@@ -103,14 +109,74 @@ class IrcViewModel : ViewModel() {
     fun setTarget(target: String) {
         if (target == "*") {
             currentTarget = target
+            clearAllUnread()
             return
         }
         currentTarget = targetMeta.firstOrNull { ircEquals(it.name, target, caseMapping) }?.name
             ?: target.ifBlank { "server" }
+        clearUnread(currentTarget)
     }
 
     fun sendMessage(message: String) {
         client.sendMessage(currentTarget, message)
+    }
+
+    fun submitComposerInput(input: String): Boolean {
+        return when (val action = parseComposerAction(input, currentTarget)) {
+            is ComposerAction.Say -> {
+                client.sendMessage(action.target, action.message)
+                true
+            }
+            is ComposerAction.Action -> {
+                client.sendAction(action.target, action.message)
+                true
+            }
+            is ComposerAction.Join -> joinChannel(action.channel)
+            is ComposerAction.Part -> partChannel(action.channel, action.reason)
+            is ComposerAction.Message -> {
+                openPrivateChat(action.target)
+                client.sendMessage(action.target, action.message)
+                true
+            }
+            is ComposerAction.Nick -> {
+                client.changeNick(action.nick)
+                true
+            }
+            is ComposerAction.Error -> {
+                feedback = action.reason
+                false
+            }
+        }
+    }
+
+    fun joinChannel(channel: String): Boolean {
+        if (status !is ConnectionStatus.Connected) {
+            feedback = "Connect before joining a channel"
+            return false
+        }
+        if (classifyTarget(channel) != TargetKind.CHANNEL || !isValidIrcTarget(channel)) {
+            feedback = "Enter a valid channel name"
+            return false
+        }
+        ensureTarget(channel)
+        setTarget(channel)
+        client.joinChannel(channel)
+        return true
+    }
+
+    fun leaveCurrentChannel(): Boolean = partChannel(currentTarget, null)
+
+    fun openPrivateChat(nick: String) {
+        if (!isValidIrcTarget(nick) || ircEquals(nick, ownNick, caseMapping)) return
+        ensureTarget(nick)
+        setTarget(nick)
+    }
+
+    fun draftFor(target: String): String = drafts[draftKey(target)].orEmpty()
+
+    fun updateDraft(target: String, value: String) {
+        val key = draftKey(target)
+        if (value.isBlank()) drafts.remove(key) else drafts[key] = value
     }
 
     fun visibleMessages(): List<IrcMessage> =
@@ -140,9 +206,14 @@ class IrcViewModel : ViewModel() {
 
     private fun ensureTargetForMessage(message: IrcMessage) {
         val derived = message.target.ifBlank { "server" }
+        val wasVisible = currentTarget == "*" || ircEquals(currentTarget, derived, caseMapping)
         ensureTarget(derived)
+        if (!wasVisible && classifyTarget(derived) != TargetKind.SERVER && !isOwnMessage(message)) {
+            markUnread(derived, message)
+        }
         if (ircEquals(currentTarget, "server", caseMapping) && classifyTarget(derived) == TargetKind.CHANNEL) {
             currentTarget = derived
+            clearUnread(derived)
         }
     }
 
@@ -163,6 +234,56 @@ class IrcViewModel : ViewModel() {
             targetMeta[index] = targetMeta[index].copy(lastActivity = now)
         }
     }
+
+    private fun partChannel(channel: String, reason: String?): Boolean {
+        if (status !is ConnectionStatus.Connected) {
+            feedback = "Connect before leaving a channel"
+            return false
+        }
+        if (classifyTarget(channel) != TargetKind.CHANNEL || !isValidIrcTarget(channel)) {
+            feedback = "Select a channel to leave"
+            return false
+        }
+        client.partChannel(channel, reason)
+        removeTarget(channel)
+        return true
+    }
+
+    private fun removeTarget(name: String) {
+        val index = targetMeta.indexOfFirst { ircEquals(it.name, name, caseMapping) }
+        if (index != -1) targetMeta.removeAt(index)
+        if (ircEquals(currentTarget, name, caseMapping)) currentTarget = "server"
+    }
+
+    private fun markUnread(target: String, message: IrcMessage) {
+        val index = targetMeta.indexOfFirst { ircEquals(it.name, target, caseMapping) }
+        if (index == -1) return
+        val isMention = classifyTarget(target) == TargetKind.PRIVATE || isIrcMention(message.body, ownNick, caseMapping)
+        targetMeta[index] = targetMeta[index].copy(
+            unreadCount = targetMeta[index].unreadCount + 1,
+            mentionCount = targetMeta[index].mentionCount + if (isMention) 1 else 0
+        )
+    }
+
+    private fun clearUnread(target: String) {
+        val index = targetMeta.indexOfFirst { ircEquals(it.name, target, caseMapping) }
+        if (index != -1 && (targetMeta[index].unreadCount != 0 || targetMeta[index].mentionCount != 0)) {
+            targetMeta[index] = targetMeta[index].copy(unreadCount = 0, mentionCount = 0)
+        }
+    }
+
+    private fun clearAllUnread() {
+        targetMeta.indices.forEach { index ->
+            if (targetMeta[index].unreadCount != 0 || targetMeta[index].mentionCount != 0) {
+                targetMeta[index] = targetMeta[index].copy(unreadCount = 0, mentionCount = 0)
+            }
+        }
+    }
+
+    private fun isOwnMessage(message: IrcMessage): Boolean =
+        ownNick.isNotBlank() && ircEquals(message.sender, ownNick, caseMapping)
+
+    private fun draftKey(target: String): String = ircCaseFold(target, caseMapping)
 
     private fun appendMessage(message: IrcMessage) {
         messages.add(message)
@@ -202,7 +323,9 @@ class IrcViewModel : ViewModel() {
 data class TargetEntry(
     val name: String,
     val kind: TargetKind,
-    val lastActivity: Long
+    val lastActivity: Long,
+    val unreadCount: Int = 0,
+    val mentionCount: Int = 0
 )
 
 internal fun pickTargetAfterConnect(

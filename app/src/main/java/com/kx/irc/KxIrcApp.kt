@@ -2,6 +2,8 @@
 
 package com.kx.irc
 
+import android.content.Intent
+import android.net.Uri
 import android.view.KeyEvent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -17,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -25,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -41,6 +45,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
@@ -95,6 +100,7 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
         }
 
         var showSettings by rememberSaveable { mutableStateOf(true) }
+        var showJoinDialog by rememberSaveable { mutableStateOf(false) }
         val lifecycleOwner = LocalLifecycleOwner.current
         val latestChatVisible by rememberUpdatedState(!showSettings)
         val latestConfigLoaded by rememberUpdatedState(configLoaded)
@@ -133,6 +139,10 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
                     onClose = { scope.launch { drawerState.close() } },
                     onOpenSettings = {
                         showSettings = true
+                        scope.launch { drawerState.close() }
+                    },
+                    onJoinChannel = {
+                        showJoinDialog = true
                         scope.launch { drawerState.close() }
                     }
                 )
@@ -183,6 +193,14 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
                     }
                 }
             }
+        }
+        if (showJoinDialog) {
+            JoinChannelDialog(
+                onDismiss = { showJoinDialog = false },
+                onJoin = { channel ->
+                    if (viewModel.joinChannel(channel)) showJoinDialog = false
+                }
+            )
         }
     }
 }
@@ -333,13 +351,25 @@ private fun MessageList(viewModel: IrcViewModel, modifier: Modifier = Modifier) 
     ) {
         items(messages, key = { it.id }) { message ->
             SelectionContainer {
-                Text(
-                    text = formatMessageLine(message),
+                val context = LocalContext.current
+                val formattedMessage = formatMessageLine(message)
+                ClickableText(
+                    text = formattedMessage,
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     softWrap = false,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    onClick = { offset ->
+                        val annotation = formattedMessage.getStringAnnotations(offset, offset).firstOrNull()
+                            ?: return@ClickableText
+                        when (annotation.tag) {
+                            LINK_ANNOTATION -> runCatching {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(annotation.item)))
+                            }
+                            NICK_ANNOTATION -> viewModel.openPrivateChat(annotation.item)
+                        }
+                    }
                 )
             }
         }
@@ -348,17 +378,20 @@ private fun MessageList(viewModel: IrcViewModel, modifier: Modifier = Modifier) 
 
 @Composable
 private fun MessageComposer(viewModel: IrcViewModel) {
-    var message by remember { mutableStateOf("") }
+    val currentTarget = viewModel.currentTarget
+    var message by rememberSaveable(currentTarget) { mutableStateOf(viewModel.draftFor(currentTarget)) }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val clipboardManager = LocalClipboardManager.current
     val inputEnabled = viewModel.status is ConnectionStatus.Connected
-    val canSend = inputEnabled && message.isNotBlank() &&
-        !viewModel.currentTarget.equals("server", ignoreCase = true) && viewModel.currentTarget != "*"
+    LaunchedEffect(currentTarget) { message = viewModel.draftFor(currentTarget) }
+    val canSend = inputEnabled && message.isNotBlank()
     val sendMessage = send@{
         if (!canSend) return@send
-        viewModel.sendMessage(message)
+        val targetAtSend = currentTarget
+        if (!viewModel.submitComposerInput(message)) return@send
         message = ""
+        viewModel.updateDraft(targetAtSend, "")
         focusManager.clearFocus()
         keyboardController?.hide()
     }
@@ -366,8 +399,11 @@ private fun MessageComposer(viewModel: IrcViewModel) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
             value = message,
-            onValueChange = { message = it.singleLineValue() },
-            label = { Text("Message") },
+            onValueChange = {
+                message = it.singleLineValue()
+                viewModel.updateDraft(currentTarget, message)
+            },
+            label = { Text("Message or /command") },
             trailingIcon = {
                 IconButton(
                     onClick = sendMessage,
@@ -395,6 +431,15 @@ private fun MessageComposer(viewModel: IrcViewModel) {
             Button(onClick = sendMessage, enabled = canSend, modifier = Modifier.testTag("sendButton")) {
                 Text("Send")
             }
+            if (classifyTarget(currentTarget) == TargetKind.CHANNEL) {
+                Button(
+                    onClick = { viewModel.leaveCurrentChannel() },
+                    enabled = inputEnabled,
+                    modifier = Modifier.testTag("leaveChannelButton")
+                ) {
+                    Text("Leave")
+                }
+            }
             Button(
                 onClick = {
                     val lines = viewModel.visibleMessages().takeLast(50).joinToString("\n") {
@@ -421,7 +466,8 @@ private fun DrawerContent(
     viewModel: IrcViewModel,
     onSelect: (String) -> Unit,
     onClose: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onJoinChannel: () -> Unit
 ) {
     ModalDrawerSheet(modifier = Modifier.testTag("drawer")) {
         Row(
@@ -440,9 +486,15 @@ private fun DrawerContent(
             onClick = { onSelect("*") },
             modifier = Modifier.testTag("allMessagesItem")
         )
+        NavigationDrawerItem(
+            label = { Text("Join channel") },
+            selected = false,
+            onClick = onJoinChannel,
+            modifier = Modifier.testTag("joinChannelItem")
+        )
         viewModel.channelTargets().forEach { entry ->
             NavigationDrawerItem(
-                label = { Text(entry.name) },
+                label = { TargetLabel(entry) },
                 selected = entry.name == viewModel.currentTarget,
                 onClick = { onSelect(entry.name) }
             )
@@ -450,7 +502,7 @@ private fun DrawerContent(
         Text("Private", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp))
         viewModel.privateTargets().forEach { entry ->
             NavigationDrawerItem(
-                label = { Text(entry.name) },
+                label = { TargetLabel(entry) },
                 selected = entry.name == viewModel.currentTarget,
                 onClick = { onSelect(entry.name) }
             )
@@ -458,7 +510,7 @@ private fun DrawerContent(
         Text("Server", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp))
         viewModel.serverTargets().forEach { entry ->
             NavigationDrawerItem(
-                label = { Text(entry.name) },
+                label = { TargetLabel(entry) },
                 selected = entry.name == viewModel.currentTarget,
                 onClick = { onSelect(entry.name) }
             )
@@ -473,14 +525,60 @@ private fun DrawerContent(
     }
 }
 
+@Composable
+private fun TargetLabel(entry: TargetEntry) {
+    val suffix = when {
+        entry.mentionCount > 0 -> "  @${entry.mentionCount}"
+        entry.unreadCount > 0 -> "  ${entry.unreadCount}"
+        else -> ""
+    }
+    Text("${entry.name}$suffix", maxLines = 1, overflow = TextOverflow.Ellipsis)
+}
+
+@Composable
+private fun JoinChannelDialog(onDismiss: () -> Unit, onJoin: (String) -> Unit) {
+    var channel by rememberSaveable { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Join channel") },
+        text = {
+            OutlinedTextField(
+                value = channel,
+                onValueChange = { channel = it.singleLineValue() },
+                label = { Text("Channel") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("joinChannelField")
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onJoin(channel) }, enabled = channel.isNotBlank()) { Text("Join") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
 internal val TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
 
 internal fun formatMessageLine(message: IrcMessage): AnnotatedString {
     val (zncTime, cleanedBody) = extractZncTimestamp(message.body)
     val time = (zncTime ?: message.timestamp.atZone(ZoneId.systemDefault()).toLocalTime()).format(TIME_FORMATTER)
     return AnnotatedString.Builder().apply {
-        append("$time (${message.sender}) ")
-        append(buildStyledMessage(cleanedBody))
+        append("$time (")
+        val nickStart = length
+        append(message.sender)
+        addStringAnnotation(NICK_ANNOTATION, message.sender, nickStart, length)
+        append(") ")
+        if (message.isAction) append("* ")
+        if (message.isNotice && message.sender != "server") append("[notice] ")
+        val styledBody = buildStyledMessage(cleanedBody)
+        val bodyStart = length
+        append(styledBody)
+        URL_PATTERN.findAll(styledBody.text).forEach { match ->
+            val url = match.value.trimEnd('.', ',', '!', '?', ')', ']', '}')
+            if (url.isNotEmpty()) {
+                addStringAnnotation(LINK_ANNOTATION, url, bodyStart + match.range.first, bodyStart + match.range.first + url.length)
+            }
+        }
     }.toAnnotatedString()
 }
 
@@ -494,3 +592,7 @@ internal fun extractZncTimestamp(body: String): Pair<LocalTime?, String> {
 }
 
 private fun String.singleLineValue(): String = replace("\r", "").replace("\n", "")
+
+internal const val LINK_ANNOTATION = "link"
+internal const val NICK_ANNOTATION = "nick"
+private val URL_PATTERN = Regex("https?://[^\\s]+", RegexOption.IGNORE_CASE)
