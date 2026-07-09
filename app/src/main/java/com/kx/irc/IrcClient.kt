@@ -1,7 +1,9 @@
 package com.kx.irc
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -9,6 +11,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
@@ -16,11 +20,14 @@ import java.io.OutputStreamWriter
 import java.net.Socket
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLParameters
+import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
 class IrcClient {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val idCounter = AtomicLong(0)
+    private val sessionCounter = AtomicLong(0)
 
     private val _status = MutableStateFlow<ConnectionStatus>(ConnectionStatus.Disconnected)
     val status: StateFlow<ConnectionStatus> = _status
@@ -31,74 +38,114 @@ class IrcClient {
     private val _events = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val events: SharedFlow<String> = _events
 
-    private var socket: Socket? = null
-    private var writer: BufferedWriter? = null
-    private var welcomed = false
-    private var currentNick: String = ""
-    private var capNegotiating = false
-    private var capBuffer: MutableSet<String> = mutableSetOf()
+    private val _caseMapping = MutableStateFlow(IrcCaseMapping.RFC1459)
+    val caseMapping: StateFlow<IrcCaseMapping> = _caseMapping
+
+    @Volatile
+    private var activeSession: Session? = null
+    private var connectionJob: Job? = null
 
     fun connect(config: IrcConfig) {
         if (_status.value is ConnectionStatus.Connecting || _status.value is ConnectionStatus.Connected) return
+
+        val session = Session(sessionCounter.incrementAndGet())
+        activeSession = session
+        _caseMapping.value = IrcCaseMapping.RFC1459
         _status.value = ConnectionStatus.Connecting
 
-        scope.launch {
+        connectionJob = scope.launch {
             try {
-                val newSocket = if (config.useTls) {
-                    val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-                    factory.createSocket(config.host, config.port)
-                } else {
-                    Socket(config.host, config.port)
+                val socket = openSocket(config)
+                if (!isActive(session)) {
+                    socket.close()
+                    return@launch
                 }
+                session.attach(socket)
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
 
-                socket = newSocket
-                val reader = BufferedReader(InputStreamReader(newSocket.getInputStream()))
-                writer = BufferedWriter(OutputStreamWriter(newSocket.getOutputStream()))
-
-                welcomed = false
-                startCapNegotiation()
-                currentNick = config.nick.ifBlank { "android" }
+                session.currentNick = config.nick.ifBlank { "android" }
+                startCapNegotiation(session)
                 val password = config.toAuthPassword()
-                if (password.isNotBlank()) writeLine("PASS $password")
-                writeLine("NICK $currentNick")
-                writeLine("USER ${config.username.ifBlank { "android" }} 0 * :${config.realName.ifBlank { "KX IRC" }}")
+                if (password.isNotBlank()) writeLine(session, "PASS :$password")
+                writeLine(session, "NICK ${session.currentNick}")
+                writeLine(
+                    session,
+                    "USER ${config.username.ifBlank { "android" }} 0 * :${config.realName.ifBlank { "KX IRC" }}"
+                )
 
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    val raw = line ?: continue
-                    handleLine(raw, config)
+                while (isActive(session) && !session.terminal) {
+                    val raw = reader.readLine() ?: break
+                    handleLine(raw, config, session)
                 }
-
-                _status.value = ConnectionStatus.Disconnected
+                if (isActive(session)) {
+                    if (session.welcomed) {
+                        _status.value = ConnectionStatus.Disconnected
+                        _events.emit("Disconnected from ${config.host}")
+                    } else {
+                        failSession(session, "Server closed the connection before welcome")
+                    }
+                }
+            } catch (_: CancellationException) {
+                // disconnect() already set the terminal state for this session.
             } catch (ex: Exception) {
-                _status.value = ConnectionStatus.Failed(ex.message ?: "Connection error")
-                _events.tryEmit("Connection failed: ${ex.message}")
+                if (isActive(session)) {
+                    failSession(session, ex.message ?: "Connection error")
+                }
             } finally {
-                closeResources()
+                session.close()
+                if (activeSession === session) {
+                    activeSession = null
+                    connectionJob = null
+                }
             }
         }
     }
 
-    private suspend fun handleLine(raw: String, config: IrcConfig) {
+    private fun openSocket(config: IrcConfig): Socket {
+        if (!config.useTls) return Socket(config.host, config.port)
+
+        val socket = (SSLSocketFactory.getDefault() as SSLSocketFactory)
+            .createSocket(config.host, config.port) as SSLSocket
+        socket.sslParameters = SSLParameters().apply {
+            endpointIdentificationAlgorithm = "HTTPS"
+        }
+        socket.startHandshake()
+        return socket
+    }
+
+    private suspend fun handleLine(raw: String, config: IrcConfig, session: Session) {
         val parsed = parseIrcLine(raw)
         val timestamp = parseServerTime(parsed) ?: Instant.now()
         when (parsed.command.uppercase()) {
-            "CAP" -> handleCap(parsed)
-            "PING" -> writeLine("PONG :${parsed.trailing ?: parsed.params.firstOrNull().orEmpty()}")
+            "CAP" -> handleCap(parsed, session)
+            "PING" -> writeLine(session, "PONG :${parsed.trailing ?: parsed.params.firstOrNull().orEmpty()}")
             "001" -> {
-                if (!welcomed) {
-                    welcomed = true
-                    currentNick = parsed.params.firstOrNull().orEmpty().ifBlank { currentNick }
+                if (!session.welcomed) {
+                    session.welcomed = true
+                    session.currentNick = parsed.params.firstOrNull().orEmpty().ifBlank { session.currentNick }
                     _status.value = ConnectionStatus.Connected("${config.host}:${config.port}")
                     _events.emit("Connected to ${config.host}")
                 }
-                config.channelList().forEach { writeLine("JOIN $it") }
+                config.channelList().forEach { writeLine(session, "JOIN $it") }
+            }
+            "005" -> {
+                parseCaseMapping(parsed)?.let { _caseMapping.value = it }
+                emitServerMessage("server", parsed.trailing.orEmpty().ifBlank { raw }, timestamp)
+            }
+            "433", "464", "465" -> {
+                val reason = parsed.trailing.orEmpty().ifBlank { "Registration failed (${parsed.command})" }
+                failSession(session, reason)
             }
             "PRIVMSG", "NOTICE" -> {
                 val sender = parseNick(parsed.prefix)
                 val target = parsed.params.firstOrNull().orEmpty()
-                val resolvedTarget = resolveTarget(target, sender)
+                val resolvedTarget = resolveTarget(target, sender, session)
                 val body = parsed.trailing ?: parsed.params.drop(1).joinToString(" ")
+                if (ircEquals(sender, session.currentNick, _caseMapping.value) &&
+                    consumePendingOutgoing(session, resolvedTarget, body)
+                ) {
+                    return
+                }
                 _messages.emit(
                     IrcMessage(
                         id = idCounter.incrementAndGet(),
@@ -120,8 +167,7 @@ class IrcClient {
                             timestamp = timestamp,
                             sender = sender,
                             target = channel,
-                            body = "* $sender joined",
-                            isNotice = false
+                            body = "* $sender joined"
                         )
                     )
                 }
@@ -138,8 +184,7 @@ class IrcClient {
                             timestamp = timestamp,
                             sender = sender,
                             target = channel,
-                            body = body,
-                            isNotice = false
+                            body = body
                         )
                     )
                 }
@@ -149,12 +194,11 @@ class IrcClient {
                 val sender = parseNick(parsed.prefix)
                 val rest = (parsed.params.drop(1) + listOfNotNull(parsed.trailing)).joinToString(" ")
                 val body = if (rest.isBlank()) raw else "* $sender set mode $rest"
-                val resolvedTarget = if (
-                    target.startsWith("#") || target.startsWith("&") || target.startsWith("+") || target.startsWith("!")
-                ) target else "server"
+                val resolvedTarget = if (classifyTarget(target) == TargetKind.CHANNEL) target else "server"
                 emitServerMessage(resolvedTarget, body, timestamp)
             }
-            "ERROR", "QUIT" -> {
+            "ERROR" -> failSession(session, parsed.trailing.orEmpty().ifBlank { raw })
+            "QUIT" -> {
                 val quitSender = parseNick(parsed.prefix)
                 val quitReason = parsed.trailing.orEmpty().ifBlank { raw }
                 emitServerMessage("server", "* $quitSender quit ($quitReason)", timestamp)
@@ -168,40 +212,60 @@ class IrcClient {
     }
 
     fun sendMessage(target: String, message: String) {
-        if (target.isBlank() || target.equals("server", ignoreCase = true) || message.isBlank()) return
         scope.launch {
-            val ok = writeLine("PRIVMSG $target :$message")
-            if (ok) {
-                _messages.emit(
-                    IrcMessage(
-                        id = idCounter.incrementAndGet(),
-                        timestamp = Instant.now(),
-                        sender = "me",
-                        target = target,
-                        body = message,
-                        isNotice = false
+            val session = activeSession
+            if (session == null || _status.value !is ConnectionStatus.Connected) {
+                emitServerMessage("server", "Failed to send message: not connected")
+                return@launch
+            }
+            val commands = runCatching { splitPrivmsgCommands(target, message) }
+                .getOrElse {
+                    emitServerMessage("server", "Failed to send message: ${it.message}")
+                    return@launch
+                }
+            commands.forEach { command ->
+                val body = command.substringAfter("PRIVMSG $target :")
+                rememberPendingOutgoing(session, target, body)
+                if (writeLine(session, command)) {
+                    _messages.emit(
+                        IrcMessage(
+                            id = idCounter.incrementAndGet(),
+                            timestamp = Instant.now(),
+                            sender = session.currentNick,
+                            target = target,
+                            body = body
+                        )
                     )
-                )
-            } else {
-                emitServerMessage("server", "Failed to send message")
+                } else {
+                    removePendingOutgoing(session, target, body)
+                    emitServerMessage("server", "Failed to send message")
+                }
             }
         }
     }
 
-    private fun writeLine(line: String): Boolean {
-        val current = writer ?: return false
-        return try {
-            current.write(line)
-            current.write("\r\n")
-            current.flush()
-            true
-        } catch (_: Exception) {
-            false
+    private suspend fun writeLine(session: Session, line: String): Boolean {
+        if (!isActive(session) || !isSafeIrcLine(line)) return false
+        return session.writeMutex.withLock {
+            val current = session.writer ?: return@withLock false
+            if (!isActive(session)) return@withLock false
+            try {
+                current.write(line)
+                current.write("\r\n")
+                current.flush()
+                true
+            } catch (_: Exception) {
+                false
+            }
         }
     }
 
     fun disconnect() {
-        closeResources()
+        val session = activeSession
+        activeSession = null
+        session?.close()
+        connectionJob?.cancel()
+        connectionJob = null
         _status.value = ConnectionStatus.Disconnected
     }
 
@@ -210,29 +274,22 @@ class IrcClient {
         scope.cancel()
     }
 
-    private fun closeResources() {
-        try {
-            writer?.close()
-        } catch (_: Exception) {
-        }
-        try {
-            socket?.close()
-        } catch (_: Exception) {
-        }
-        writer = null
-        socket = null
-        welcomed = false
-        currentNick = ""
+    private fun isActive(session: Session): Boolean = activeSession === session
+
+    private suspend fun failSession(session: Session, reason: String) {
+        if (!isActive(session) || session.terminal) return
+        session.terminal = true
+        _status.value = ConnectionStatus.Failed(reason)
+        _events.emit("Connection failed: $reason")
+        session.close()
     }
 
-    private fun resolveTarget(target: String, sender: String): String {
+    private fun resolveTarget(target: String, sender: String, session: Session): String {
         if (target.isBlank()) return "server"
-        val kind = classifyTarget(target)
-        if (kind == TargetKind.CHANNEL) return target
-        if (target.equals(currentNick, ignoreCase = true)) {
-            return sender.ifBlank { "server" }
-        }
-        return if (sender.isNotBlank()) sender else "server"
+        if (classifyTarget(target) == TargetKind.CHANNEL) return target
+        if (ircEquals(target, session.currentNick, _caseMapping.value)) return sender.ifBlank { "server" }
+        if (ircEquals(sender, session.currentNick, _caseMapping.value)) return target
+        return sender.ifBlank { "server" }
     }
 
     private suspend fun emitServerMessage(target: String, body: String, timestamp: Instant = Instant.now()) {
@@ -255,39 +312,40 @@ class IrcClient {
             ?: runCatching { java.time.LocalDateTime.parse(tag).toInstant(java.time.ZoneOffset.UTC) }.getOrNull()
     }
 
-    private fun startCapNegotiation() {
-        capNegotiating = true
-        capBuffer.clear()
-        writeLine("CAP LS 302")
+    private suspend fun startCapNegotiation(session: Session) {
+        session.capNegotiating = true
+        session.capBuffer.clear()
+        writeLine(session, "CAP LS 302")
     }
 
-    private fun handleCap(line: IrcLine) {
+    private suspend fun handleCap(line: IrcLine, session: Session) {
         if (line.params.size < 2) return
         val subcommand = line.params[1].uppercase()
         val caps = parseCapList(line)
         when (subcommand) {
             "LS" -> {
-                capBuffer.addAll(caps)
+                session.capBuffer.addAll(caps)
                 val isPartial = line.params.getOrNull(2) == "*"
                 if (!isPartial) {
                     val requested = listOf(
                         "server-time",
                         "znc.in/server-time-iso",
-                        "znc.in/server-time"
-                    ).filter { capBuffer.contains(it) }
+                        "znc.in/server-time",
+                        "echo-message"
+                    ).filter { capability -> session.capBuffer.any { it.substringBefore('=').removePrefix("~") == capability } }
                     if (requested.isNotEmpty()) {
-                        writeLine("CAP REQ :${requested.joinToString(" ")}")
+                        writeLine(session, "CAP REQ :${requested.joinToString(" ")}")
                     } else {
-                        writeLine("CAP END")
-                        capNegotiating = false
+                        writeLine(session, "CAP END")
+                        session.capNegotiating = false
                     }
-                    capBuffer.clear()
+                    session.capBuffer.clear()
                 }
             }
             "ACK", "NAK" -> {
-                if (capNegotiating) {
-                    writeLine("CAP END")
-                    capNegotiating = false
+                if (session.capNegotiating) {
+                    writeLine(session, "CAP END")
+                    session.capNegotiating = false
                 }
             }
         }
@@ -299,4 +357,86 @@ class IrcClient {
             .map { it.trim() }
             .filter { it.isNotBlank() }
     }
+
+    private fun parseCaseMapping(line: IrcLine): IrcCaseMapping? {
+        val mapping = line.params.drop(1)
+            .firstOrNull { it.startsWith("CASEMAPPING=", ignoreCase = true) }
+            ?.substringAfter('=')
+            ?.lowercase()
+            ?: return null
+        return when (mapping) {
+            "ascii" -> IrcCaseMapping.ASCII
+            "strict-rfc1459" -> IrcCaseMapping.STRICT_RFC1459
+            "rfc1459" -> IrcCaseMapping.RFC1459
+            else -> null
+        }
+    }
+
+    private suspend fun rememberPendingOutgoing(session: Session, target: String, body: String) {
+        session.outgoingMutex.withLock {
+            val now = Instant.now()
+            session.pendingOutgoing.removeAll { it.createdAt.plusSeconds(30).isBefore(now) }
+            session.pendingOutgoing.addLast(PendingOutgoing(target, body, now))
+        }
+    }
+
+    private suspend fun consumePendingOutgoing(session: Session, target: String, body: String): Boolean =
+        session.outgoingMutex.withLock {
+            val now = Instant.now()
+            session.pendingOutgoing.removeAll { it.createdAt.plusSeconds(30).isBefore(now) }
+            val matchIndex = session.pendingOutgoing.indexOfFirst {
+                ircEquals(it.target, target, _caseMapping.value) && it.body == body
+            }
+            if (matchIndex == -1) return@withLock false
+            session.pendingOutgoing.removeAt(matchIndex)
+            true
+        }
+
+    private suspend fun removePendingOutgoing(session: Session, target: String, body: String) {
+        session.outgoingMutex.withLock {
+            val matchIndex = session.pendingOutgoing.indexOfLast {
+                ircEquals(it.target, target, _caseMapping.value) && it.body == body
+            }
+            if (matchIndex != -1) session.pendingOutgoing.removeAt(matchIndex)
+        }
+    }
+
+    private class Session(val id: Long) {
+        var socket: Socket? = null
+        var writer: BufferedWriter? = null
+        val writeMutex = Mutex()
+        val outgoingMutex = Mutex()
+        val pendingOutgoing = ArrayDeque<PendingOutgoing>()
+        var welcomed = false
+        var terminal = false
+        var currentNick = ""
+        var capNegotiating = false
+        val capBuffer = mutableSetOf<String>()
+
+        fun attach(newSocket: Socket) {
+            socket = newSocket
+            writer = BufferedWriter(OutputStreamWriter(newSocket.getOutputStream(), Charsets.UTF_8))
+        }
+
+        fun close() {
+            try {
+                writer?.close()
+            } catch (_: Exception) {
+            }
+            try {
+                socket?.close()
+            } catch (_: Exception) {
+            }
+            writer = null
+            socket = null
+            welcomed = false
+            currentNick = ""
+        }
+    }
+
+    private data class PendingOutgoing(
+        val target: String,
+        val body: String,
+        val createdAt: Instant
+    )
 }

@@ -63,7 +63,30 @@ private fun parseTags(tagSection: String): Map<String, String?> {
         if (tag.isBlank()) return@mapNotNull null
         val parts = tag.split('=', limit = 2)
         val key = parts[0]
-        val value = if (parts.size > 1) parts[1] else null
+        val value = if (parts.size > 1) unescapeTagValue(parts[1]) else null
         key to value
     }.toMap()
+}
+
+private fun unescapeTagValue(value: String): String = buildString(value.length) {
+    var index = 0
+    while (index < value.length) {
+        val character = value[index]
+        if (character == '\\' && index + 1 < value.length) {
+            append(
+                when (value[index + 1]) {
+                    ':' -> ';'
+                    's' -> ' '
+                    '\\' -> '\\'
+                    'r' -> '\r'
+                    'n' -> '\n'
+                    else -> value[index + 1]
+                }
+            )
+            index += 2
+        } else {
+            append(character)
+            index += 1
+        }
+    }
 }

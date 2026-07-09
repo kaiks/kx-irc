@@ -32,4 +32,11 @@ class IrcParserTest {
         assertEquals(listOf("#chan"), parsed.params)
         assertEquals("hello", parsed.trailing)
     }
+
+    @Test
+    fun parseIrcLineUnescapesIrcv3TagValues() {
+        val parsed = parseIrcLine("@label=one\\stwo\\:three\\\\four :server NOTICE me :hello")
+
+        assertEquals("one two;three\\four", parsed.tags["label"])
+    }
 }
