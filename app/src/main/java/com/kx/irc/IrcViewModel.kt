@@ -21,6 +21,11 @@ class IrcViewModel : ViewModel() {
     var currentTarget by mutableStateOf("server")
         private set
 
+    var feedback by mutableStateOf<String?>(null)
+        private set
+
+    private var caseMapping by mutableStateOf(IrcCaseMapping.RFC1459)
+
     val messages = mutableStateListOf<IrcMessage>()
     private val targetMeta = mutableStateListOf<TargetEntry>()
 
@@ -30,8 +35,17 @@ class IrcViewModel : ViewModel() {
             client.status.collectLatest { status = it }
         }
         viewModelScope.launch {
+            client.events.collect { feedback = it }
+        }
+        viewModelScope.launch {
+            client.caseMapping.collectLatest {
+                caseMapping = it
+                mergeEquivalentTargets()
+            }
+        }
+        viewModelScope.launch {
             client.messages.collect { message ->
-                messages.add(message)
+                appendMessage(message)
                 ensureTargetForMessage(message)
             }
         }
@@ -45,16 +59,18 @@ class IrcViewModel : ViewModel() {
         config = newConfig
     }
 
-    fun connect() {
+    fun connect(): Boolean {
         val error = config.validate()
         if (error != null) {
             status = ConnectionStatus.Failed(error)
-            return
+            feedback = error
+            return false
         }
         messages.clear()
         syncTargetsFromConfig()
         client.connect(config)
         currentTarget = preferredTargetAfterConnect()
+        return true
     }
 
     fun disconnect() {
@@ -62,7 +78,12 @@ class IrcViewModel : ViewModel() {
     }
 
     fun setTarget(target: String) {
-        currentTarget = target
+        if (target == "*") {
+            currentTarget = target
+            return
+        }
+        currentTarget = targetMeta.firstOrNull { ircEquals(it.name, target, caseMapping) }?.name
+            ?: target.ifBlank { "server" }
     }
 
     fun sendMessage(message: String) {
@@ -70,7 +91,7 @@ class IrcViewModel : ViewModel() {
     }
 
     fun visibleMessages(): List<IrcMessage> =
-        filterMessagesByTarget(messages, currentTarget)
+        filterMessagesByTarget(messages, currentTarget, caseMapping)
             .sortedWith(compareBy<IrcMessage> { it.timestamp }.thenBy { it.id })
 
     fun channelTargets(): List<TargetEntry> =
@@ -90,6 +111,14 @@ class IrcViewModel : ViewModel() {
         return "server"
     }
 
+    fun showFeedback(message: String) {
+        feedback = message
+    }
+
+    fun clearFeedback(message: String) {
+        if (feedback == message) feedback = null
+    }
+
     override fun onCleared() {
         client.shutdown()
     }
@@ -97,7 +126,7 @@ class IrcViewModel : ViewModel() {
     private fun ensureTargetForMessage(message: IrcMessage) {
         val derived = message.target.ifBlank { "server" }
         ensureTarget(derived)
-        if (currentTarget == "server" && classifyTarget(derived) == TargetKind.CHANNEL) {
+        if (ircEquals(currentTarget, "server", caseMapping) && classifyTarget(derived) == TargetKind.CHANNEL) {
             currentTarget = derived
         }
     }
@@ -112,12 +141,46 @@ class IrcViewModel : ViewModel() {
         val key = name.ifBlank { "server" }
         val kind = classifyTarget(key)
         val now = System.currentTimeMillis()
-        val index = targetMeta.indexOfFirst { it.name == key }
+        val index = targetMeta.indexOfFirst { ircEquals(it.name, key, caseMapping) }
         if (index == -1) {
             targetMeta.add(TargetEntry(key, kind, now))
         } else {
             targetMeta[index] = targetMeta[index].copy(lastActivity = now)
         }
+    }
+
+    private fun appendMessage(message: IrcMessage) {
+        messages.add(message)
+        val target = message.target.ifBlank { "server" }
+        while (messages.count { ircEquals(it.target, target, caseMapping) } > MAX_MESSAGES_PER_TARGET) {
+            val index = messages.indexOfFirst { ircEquals(it.target, target, caseMapping) }
+            if (index == -1) break
+            messages.removeAt(index)
+        }
+        while (messages.size > MAX_MESSAGES_TOTAL) {
+            messages.removeAt(0)
+        }
+    }
+
+    private fun mergeEquivalentTargets() {
+        val merged = mutableListOf<TargetEntry>()
+        targetMeta.forEach { entry ->
+            val existingIndex = merged.indexOfFirst { ircEquals(it.name, entry.name, caseMapping) }
+            if (existingIndex == -1) {
+                merged += entry
+            } else if (entry.lastActivity > merged[existingIndex].lastActivity) {
+                merged[existingIndex] = entry
+            }
+        }
+        if (merged != targetMeta) {
+            targetMeta.clear()
+            targetMeta.addAll(merged)
+        }
+    }
+
+    private companion object {
+        const val MAX_MESSAGES_PER_TARGET = 500
+        const val MAX_MESSAGES_TOTAL = 2_000
     }
 }
 

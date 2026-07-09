@@ -31,7 +31,8 @@ private data class StyleState(
     val bg: Color? = null,
     val bold: Boolean = false,
     val italic: Boolean = false,
-    val underline: Boolean = false
+    val underline: Boolean = false,
+    val reversed: Boolean = false
 )
 
 fun buildStyledMessage(message: String): AnnotatedString {
@@ -42,8 +43,8 @@ fun buildStyledMessage(message: String): AnnotatedString {
     fun applyStyle(text: String) {
         if (text.isEmpty()) return
         val style = SpanStyle(
-            color = state.fg ?: Color.Unspecified,
-            background = state.bg ?: Color.Unspecified,
+            color = if (state.reversed) state.bg ?: Color.Unspecified else state.fg ?: Color.Unspecified,
+            background = if (state.reversed) state.fg ?: Color.Unspecified else state.bg ?: Color.Unspecified,
             fontWeight = if (state.bold) FontWeight.Bold else null,
             fontStyle = if (state.italic) FontStyle.Italic else null,
             textDecoration = if (state.underline) TextDecoration.Underline else null
@@ -84,12 +85,22 @@ fun buildStyledMessage(message: String): AnnotatedString {
             '\u0003' -> { // color
                 applyStyle(buffer.toString())
                 buffer.clear()
-                val (fg, bg, consumed) = parseColorCodes(message, index + 1)
-                state = state.copy(fg = fg ?: state.fg, bg = bg ?: state.bg)
-                index += consumed + 1
+                val colors = parseColorCodes(message, index + 1)
+                state = if (colors.hasColorCode) {
+                    state.copy(fg = colors.fg, bg = colors.bg)
+                } else {
+                    state.copy(fg = null, bg = null)
+                }
+                index += colors.consumed + 1
+            }
+            '\u0016' -> { // reverse
+                applyStyle(buffer.toString())
+                buffer.clear()
+                state = state.copy(reversed = !state.reversed)
+                index += 1
             }
             else -> {
-                buffer.append(ch)
+                if (ch.code >= 0x20) buffer.append(ch)
                 index += 1
             }
         }
@@ -99,8 +110,15 @@ fun buildStyledMessage(message: String): AnnotatedString {
     return builder.toAnnotatedString()
 }
 
-private fun parseColorCodes(text: String, start: Int): Triple<Color?, Color?, Int> {
-    if (start >= text.length) return Triple(null, null, 0)
+private data class ParsedColors(
+    val fg: Color?,
+    val bg: Color?,
+    val consumed: Int,
+    val hasColorCode: Boolean
+)
+
+private fun parseColorCodes(text: String, start: Int): ParsedColors {
+    if (start >= text.length) return ParsedColors(null, null, 0, false)
 
     var idx = start
     val fgDigits = StringBuilder()
@@ -109,6 +127,7 @@ private fun parseColorCodes(text: String, start: Int): Triple<Color?, Color?, In
         idx += 1
     }
 
+    val hasForeground = fgDigits.isNotEmpty()
     val fg = fgDigits.toString().toIntOrNull()?.let { MircColors[it] }
     var bg: Color? = null
 
@@ -122,5 +141,5 @@ private fun parseColorCodes(text: String, start: Int): Triple<Color?, Color?, In
         bg = bgDigits.toString().toIntOrNull()?.let { MircColors[it] }
     }
 
-    return Triple(fg, bg, idx - start)
+    return ParsedColors(fg, bg, idx - start, hasForeground)
 }

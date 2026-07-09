@@ -1,6 +1,7 @@
 package com.kx.irc
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -23,13 +24,14 @@ class KxIrcUiTest {
     fun resetPrefs() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         context.getSharedPreferences("kx_irc_prefs", 0).edit().clear().commit()
+        rule.activityRule.scenario.recreate()
     }
 
     @Test
-    fun settingsFormOrderAndTlsDefaultOff() {
+    fun settingsFormOrderAndTlsDefaultOn() {
         ensureSettingsVisible()
         rule.onNodeWithTag("settingsList").performScrollToNode(hasTestTag("hostField"))
-        rule.onNodeWithTag("tlsSwitch").assertIsOff()
+        rule.onNodeWithTag("tlsSwitch").assertIsOn()
         rule.onNodeWithTag("settingsList").performScrollToNode(hasTestTag("channelsField"))
     }
 
@@ -47,19 +49,19 @@ class KxIrcUiTest {
             .performScrollToNode(hasTestTag("tlsSwitch"))
         val tls = rule.onNodeWithTag("tlsSwitch")
         tls.performClick()
+        tls.assertIsOff()
     }
 
     @Test
-    fun canSendLocalMessageWithoutConnection() {
+    fun messageInputIsDisabledUntilConnected() {
         ensureSettingsVisible()
+        rule.onNodeWithTag("hostField").performTextInput("127.0.0.1")
         rule.onNodeWithTag("connectButton").performClick()
-        rule.onNodeWithTag("contentList")
-            .performScrollToNode(hasTestTag("messageField"))
-        rule.onNodeWithTag("messageField").performTextInput("hello")
-        rule.onNodeWithTag("sendButton").performClick()
 
-        rule.onNodeWithTag("contentList")
-            .performScrollToNode(hasTestTag("messageList"))
+        rule.onNodeWithTag("contentList").assertIsDisplayed()
+        rule.onNodeWithTag("messageField").assertIsNotEnabled()
+        rule.onNodeWithTag("sendButton").assertIsNotEnabled()
+        rule.onNodeWithTag("inlineSendButton").assertIsNotEnabled()
     }
 
     @Test
@@ -72,6 +74,12 @@ class KxIrcUiTest {
     fun drawerHasCloseButton() {
         rule.onNodeWithTag("menuButton").performClick()
         rule.onNodeWithTag("drawerClose").assertIsDisplayed()
+    }
+
+    @Test
+    fun drawerOffersAllMessagesView() {
+        rule.onNodeWithTag("menuButton").performClick()
+        rule.onNodeWithTag("allMessagesItem").assertIsDisplayed()
     }
 
     private fun ensureSettingsVisible() {

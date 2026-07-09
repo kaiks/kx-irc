@@ -2,6 +2,7 @@
 
 package com.kx.irc
 
+import android.view.KeyEvent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -9,16 +10,23 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -28,52 +36,57 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import android.view.KeyEvent
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.ui.text.AnnotatedString
+import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.launch
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.runtime.rememberCoroutineScope
-import java.time.LocalTime
 
 @Composable
 fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
     KxIrcTheme {
         val context = LocalContext.current
         val store = remember { ConnectionStore(context) }
+        val snackbarHostState = remember { SnackbarHostState() }
         LaunchedEffect(Unit) {
             viewModel.replaceConfig(store.load())
         }
+        val feedback = viewModel.feedback
+        LaunchedEffect(feedback) {
+            feedback?.let {
+                snackbarHostState.showSnackbar(it)
+                viewModel.clearFeedback(it)
+            }
+        }
+
         var showSettings by rememberSaveable { mutableStateOf(true) }
         val drawerState = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
@@ -96,14 +109,16 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
             }
         ) {
             Scaffold(
+                snackbarHost = { SnackbarHost(snackbarHostState) },
                 topBar = {
                     Header(
                         viewModel = viewModel,
                         onMenu = { scope.launch { drawerState.open() } },
                         onConnect = {
-                            store.save(viewModel.config)
-                            viewModel.connect()
-                            showSettings = false
+                            if (viewModel.connect()) {
+                                store.save(viewModel.config)?.let(viewModel::showFeedback)
+                                showSettings = false
+                            }
                         },
                         onDisconnect = {
                             viewModel.disconnect()
@@ -126,22 +141,36 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
                             item { ConnectionForm(viewModel) }
                         }
                     } else {
-                        LazyColumn(
+                        ChatContent(
+                            viewModel = viewModel,
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(padding)
                                 .padding(16.dp)
                                 .imePadding()
-                                .testTag("contentList"),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            item { MessageList(viewModel) }
-                            item { MessageComposer(viewModel) }
-                        }
+                                .testTag("contentList")
+                        )
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ChatContent(viewModel: IrcViewModel, modifier: Modifier = Modifier) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        val failedStatus = viewModel.status as? ConnectionStatus.Failed
+        if (failedStatus != null) {
+            Text(
+                text = "Connection failed: ${failedStatus.reason}",
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.testTag("connectionError")
+            )
+        }
+        MessageList(viewModel, Modifier.weight(1f))
+        HorizontalDivider()
+        MessageComposer(viewModel)
     }
 }
 
@@ -155,14 +184,12 @@ private fun Header(
     val status = viewModel.status
     val network = when (status) {
         is ConnectionStatus.Connected -> status.server
-        is ConnectionStatus.Connecting -> "${viewModel.config.host}:${viewModel.config.port}"
-        is ConnectionStatus.Failed -> "${viewModel.config.host}:${viewModel.config.port}"
+        is ConnectionStatus.Connecting, is ConnectionStatus.Failed -> "${viewModel.config.host}:${viewModel.config.port}"
         ConnectionStatus.Disconnected -> viewModel.config.host.ifBlank { "KX IRC" }
     }
     val targetLabel = viewModel.currentTarget.ifBlank { "server" }
-    val title = "$targetLabel — $network"
     TopAppBar(
-        title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        title = { Text("$targetLabel — $network", maxLines = 1, overflow = TextOverflow.Ellipsis) },
         navigationIcon = {
             IconButton(onClick = onMenu, modifier = Modifier.testTag("menuButton")) {
                 Icon(Icons.Filled.Menu, contentDescription = "Menu")
@@ -184,30 +211,26 @@ private fun Header(
 private fun ConnectionForm(viewModel: IrcViewModel) {
     val config = viewModel.config
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("settingsScroll"),
+        modifier = Modifier.fillMaxWidth().testTag("settingsScroll"),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         OutlinedTextField(
             value = config.host,
-            onValueChange = { viewModel.updateConfig { copy(host = it) } },
+            onValueChange = { viewModel.updateConfig { copy(host = it.singleLineValue()) } },
             label = { Text("Host") },
             modifier = Modifier.fillMaxWidth().testTag("hostField"),
             singleLine = true
         )
         OutlinedTextField(
             value = if (config.port == 0) "" else config.port.toString(),
-            onValueChange = {
-                viewModel.updateConfig { copy(port = it.toIntOrNull() ?: 0) }
-            },
+            onValueChange = { viewModel.updateConfig { copy(port = it.toIntOrNull() ?: 0) } },
             label = { Text("Port") },
             modifier = Modifier.fillMaxWidth().testTag("portField"),
             singleLine = true
         )
         OutlinedTextField(
             value = config.serverPassword,
-            onValueChange = { viewModel.updateConfig { copy(serverPassword = it) } },
+            onValueChange = { viewModel.updateConfig { copy(serverPassword = it.singleLineValue()) } },
             label = { Text("Password (optional)") },
             modifier = Modifier.fillMaxWidth().testTag("passwordField"),
             singleLine = true,
@@ -223,28 +246,28 @@ private fun ConnectionForm(viewModel: IrcViewModel) {
         }
         OutlinedTextField(
             value = config.nick,
-            onValueChange = { viewModel.updateConfig { copy(nick = it) } },
+            onValueChange = { viewModel.updateConfig { copy(nick = it.singleLineValue()) } },
             label = { Text("Nick") },
             modifier = Modifier.fillMaxWidth().testTag("nickField"),
             singleLine = true
         )
         OutlinedTextField(
             value = config.username,
-            onValueChange = { viewModel.updateConfig { copy(username = it) } },
+            onValueChange = { viewModel.updateConfig { copy(username = it.singleLineValue()) } },
             label = { Text("Username") },
             modifier = Modifier.fillMaxWidth().testTag("usernameField"),
             singleLine = true
         )
         OutlinedTextField(
             value = config.realName,
-            onValueChange = { viewModel.updateConfig { copy(realName = it) } },
+            onValueChange = { viewModel.updateConfig { copy(realName = it.singleLineValue()) } },
             label = { Text("Real name") },
             modifier = Modifier.fillMaxWidth().testTag("realNameField"),
             singleLine = true
         )
         OutlinedTextField(
             value = config.channels,
-            onValueChange = { viewModel.updateConfig { copy(channels = it) } },
+            onValueChange = { viewModel.updateConfig { copy(channels = it.singleLineValue()) } },
             label = { Text("Channels (comma or space separated)") },
             modifier = Modifier.fillMaxWidth().testTag("channelsField"),
             singleLine = true
@@ -253,47 +276,40 @@ private fun ConnectionForm(viewModel: IrcViewModel) {
 }
 
 @Composable
-private fun MessageList(viewModel: IrcViewModel) {
+private fun MessageList(viewModel: IrcViewModel, modifier: Modifier = Modifier) {
     val messages = viewModel.visibleMessages()
     val listState = rememberLazyListState()
-    val atBottom by remember {
-        derivedStateOf {
-            val layoutInfo = listState.layoutInfo
-            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            lastVisible >= layoutInfo.totalItemsCount - 1
-        }
-    }
     val currentTarget = viewModel.currentTarget
+    var shouldAutoScroll by remember(currentTarget) { mutableStateOf(true) }
 
     LaunchedEffect(currentTarget) {
-        if (messages.isNotEmpty()) {
-            listState.scrollToItem(messages.size - 1)
-        }
+        shouldAutoScroll = true
+        if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty() && atBottom) {
-            listState.scrollToItem(messages.size - 1)
+        if (messages.isNotEmpty() && (shouldAutoScroll || isNearBottom(listState, messages.size))) {
+            listState.scrollToItem(messages.lastIndex)
         }
+    }
+    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, messages.size) {
+        if (messages.isNotEmpty()) shouldAutoScroll = isNearBottom(listState, messages.size)
     }
 
     LazyColumn(
         state = listState,
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 240.dp, max = 420.dp)
-            .testTag("messageList"),
+        modifier = modifier.fillMaxWidth().testTag("messageList"),
         contentPadding = PaddingValues(bottom = 8.dp)
     ) {
         items(messages, key = { it.id }) { message ->
             SelectionContainer {
-            Text(
-                text = formatMessageLine(message),
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = Int.MAX_VALUE,
-                overflow = TextOverflow.Clip,
-                softWrap = true,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-            )
+                Text(
+                    text = formatMessageLine(message),
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    softWrap = false,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                )
             }
         }
     }
@@ -305,18 +321,38 @@ private fun MessageComposer(viewModel: IrcViewModel) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val clipboardManager = LocalClipboardManager.current
+    val inputEnabled = viewModel.status is ConnectionStatus.Connected
+    val canSend = inputEnabled && message.isNotBlank() &&
+        !viewModel.currentTarget.equals("server", ignoreCase = true) && viewModel.currentTarget != "*"
+    val sendMessage = send@{
+        if (!canSend) return@send
+        viewModel.sendMessage(message)
+        message = ""
+        focusManager.clearFocus()
+        keyboardController?.hide()
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
             value = message,
-            onValueChange = { message = it },
+            onValueChange = { message = it.singleLineValue() },
             label = { Text("Message") },
+            trailingIcon = {
+                IconButton(
+                    onClick = sendMessage,
+                    enabled = canSend,
+                    modifier = Modifier.testTag("inlineSendButton")
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                }
+            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { sendMessage() }),
+            enabled = inputEnabled,
             modifier = Modifier.fillMaxWidth().testTag("messageField").onPreviewKeyEvent { event ->
                 val native = event.nativeKeyEvent
                 if (native.keyCode == KeyEvent.KEYCODE_ENTER && native.action == KeyEvent.ACTION_UP) {
-                    viewModel.sendMessage(message)
-                    message = ""
-                    focusManager.clearFocus()
-                    keyboardController?.hide()
+                    sendMessage()
                     true
                 } else {
                     false
@@ -325,15 +361,7 @@ private fun MessageComposer(viewModel: IrcViewModel) {
             singleLine = true
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = {
-                    viewModel.sendMessage(message)
-                    message = ""
-                    focusManager.clearFocus()
-                    keyboardController?.hide()
-                },
-                modifier = Modifier.testTag("sendButton")
-            ) {
+            Button(onClick = sendMessage, enabled = canSend, modifier = Modifier.testTag("sendButton")) {
                 Text("Send")
             }
             Button(
@@ -341,9 +369,7 @@ private fun MessageComposer(viewModel: IrcViewModel) {
                     val lines = viewModel.visibleMessages().takeLast(50).joinToString("\n") {
                         formatMessageLine(it).text
                     }
-                    if (lines.isNotBlank()) {
-                        clipboardManager.setText(AnnotatedString(lines))
-                    }
+                    if (lines.isNotBlank()) clipboardManager.setText(AnnotatedString(lines))
                 },
                 modifier = Modifier.testTag("copyLastButton")
             ) {
@@ -351,6 +377,12 @@ private fun MessageComposer(viewModel: IrcViewModel) {
             }
         }
     }
+}
+
+private fun isNearBottom(listState: LazyListState, totalItems: Int): Boolean {
+    if (totalItems <= 0) return true
+    val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return true
+    return lastVisible >= totalItems - 2
 }
 
 @Composable
@@ -371,6 +403,12 @@ private fun DrawerContent(
                 Icon(Icons.Filled.Close, contentDescription = "Close")
             }
         }
+        NavigationDrawerItem(
+            label = { Text("All messages") },
+            selected = viewModel.currentTarget == "*",
+            onClick = { onSelect("*") },
+            modifier = Modifier.testTag("allMessagesItem")
+        )
         viewModel.channelTargets().forEach { entry ->
             NavigationDrawerItem(
                 label = { Text(entry.name) },
@@ -404,28 +442,24 @@ private fun DrawerContent(
     }
 }
 
-private val TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+internal val TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
 
-private fun formatMessageLine(message: IrcMessage): AnnotatedString {
+internal fun formatMessageLine(message: IrcMessage): AnnotatedString {
     val (zncTime, cleanedBody) = extractZncTimestamp(message.body)
-    val time = (zncTime ?: message.timestamp.atZone(ZoneId.systemDefault()).toLocalTime())
-        .format(TIME_FORMATTER)
-    val prefix = "$time (${message.sender}) "
-    val body = buildStyledMessage(cleanedBody).text
-    return AnnotatedString(prefix + body)
+    val time = (zncTime ?: message.timestamp.atZone(ZoneId.systemDefault()).toLocalTime()).format(TIME_FORMATTER)
+    return AnnotatedString.Builder().apply {
+        append("$time (${message.sender}) ")
+        append(buildStyledMessage(cleanedBody))
+    }.toAnnotatedString()
 }
 
-private fun extractZncTimestamp(body: String): Pair<LocalTime?, String> {
+internal fun extractZncTimestamp(body: String): Pair<LocalTime?, String> {
     val trimmed = body.trimStart()
     if (!trimmed.startsWith("[")) return Pair(null, body)
     val end = trimmed.indexOf(']')
     if (end <= 1) return Pair(null, body)
-    val timeCandidate = trimmed.substring(1, end)
-    val time = runCatching { LocalTime.parse(timeCandidate, TIME_FORMATTER) }.getOrNull()
-    return if (time != null) {
-        val remainder = trimmed.substring(end + 1).trimStart()
-        Pair(time, remainder)
-    } else {
-        Pair(null, body)
-    }
+    val time = runCatching { LocalTime.parse(trimmed.substring(1, end), TIME_FORMATTER) }.getOrNull()
+    return if (time != null) Pair(time, trimmed.substring(end + 1).trimStart()) else Pair(null, body)
 }
+
+private fun String.singleLineValue(): String = replace("\r", "").replace("\n", "")

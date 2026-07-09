@@ -10,5 +10,13 @@ class IrcColorsTest {
         val styled = buildStyledMessage(message)
 
         assertEquals("Hello bold and colors!", styled.text)
+        assertEquals(true, styled.spanStyles.isNotEmpty())
+    }
+
+    @Test
+    fun buildStyledMessageResetsColorsAndStripsReverseControl() {
+        val styled = buildStyledMessage("\u000304red\u0003plain\u0016 reversed")
+
+        assertEquals("redplain reversed", styled.text)
     }
 }
