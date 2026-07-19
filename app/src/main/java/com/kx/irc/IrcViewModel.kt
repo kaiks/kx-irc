@@ -33,7 +33,7 @@ class IrcViewModel : ViewModel() {
     val messages = mutableStateListOf<IrcMessage>()
     private val targetMeta = mutableStateListOf<TargetEntry>()
     private val drafts = mutableStateMapOf<String, String>()
-    private val channelRosters = mutableStateMapOf<String, List<String>>()
+    private val channelRosters = mutableStateMapOf<String, List<ChannelMember>>()
 
     init {
         ensureTarget("server")
@@ -54,7 +54,7 @@ class IrcViewModel : ViewModel() {
         }
         viewModelScope.launch {
             client.channelRosters.collectLatest { update ->
-                channelRosters[draftKey(update.channel)] = update.nicknames
+                channelRosters[draftKey(update.channel)] = update.members
             }
         }
         viewModelScope.launch {
@@ -188,10 +188,37 @@ class IrcViewModel : ViewModel() {
 
     fun mentionSuggestions(target: String, draft: String): List<String> {
         if (classifyTarget(target) != TargetKind.CHANNEL) return emptyList()
-        return findMentionSuggestions(draft, channelRosters[draftKey(target)].orEmpty(), ownNick, caseMapping)
+        val nicknames = channelRosters[draftKey(target)].orEmpty().map(ChannelMember::nick)
+        return findMentionSuggestions(draft, nicknames, ownNick, caseMapping)
     }
 
     fun insertMention(draft: String, nick: String): String = insertMentionSuggestion(draft, nick)
+
+    fun channelMembers(channel: String = currentTarget): List<ChannelMember> =
+        if (classifyTarget(channel) == TargetKind.CHANNEL) channelRosters[draftKey(channel)].orEmpty() else emptyList()
+
+    fun isOwnNick(nick: String): Boolean = ownNick.isNotBlank() && ircEquals(nick, ownNick, caseMapping)
+
+    fun canModerateChannel(channel: String = currentTarget): Boolean =
+        channelMembers(channel).any { isOwnNick(it.nick) && it.isOperator }
+
+    fun kickMember(channel: String, nick: String): Boolean {
+        if (!canModerate(channel, nick)) return false
+        client.kick(channel, nick)
+        return true
+    }
+
+    fun voiceMember(channel: String, nick: String): Boolean {
+        if (!canModerate(channel, nick)) return false
+        client.setChannelMemberMode(channel, nick, 'v')
+        return true
+    }
+
+    fun opMember(channel: String, nick: String): Boolean {
+        if (!canModerate(channel, nick)) return false
+        client.setChannelMemberMode(channel, nick, 'o')
+        return true
+    }
 
     fun visibleMessages(): List<IrcMessage> =
         filterMessagesByTarget(messages, currentTarget, caseMapping)
@@ -296,6 +323,19 @@ class IrcViewModel : ViewModel() {
 
     private fun isOwnMessage(message: IrcMessage): Boolean =
         ownNick.isNotBlank() && ircEquals(message.sender, ownNick, caseMapping)
+
+    private fun canModerate(channel: String, nick: String): Boolean {
+        if (status !is ConnectionStatus.Connected || classifyTarget(channel) != TargetKind.CHANNEL) {
+            feedback = "Connect to a channel before moderating members"
+            return false
+        }
+        if (isOwnNick(nick) || channelMembers(channel).none { ircEquals(it.nick, nick, caseMapping) }) return false
+        if (!canModerateChannel(channel)) {
+            feedback = "Channel operator status is required"
+            return false
+        }
+        return true
+    }
 
     private fun draftKey(target: String): String = ircCaseFold(target, caseMapping)
 

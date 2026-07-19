@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -29,6 +30,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.People
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
@@ -37,6 +40,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
@@ -60,9 +65,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -81,6 +88,7 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 @Composable
 fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
@@ -103,6 +111,7 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
 
         var showSettings by rememberSaveable { mutableStateOf(true) }
         var showJoinDialog by rememberSaveable { mutableStateOf(false) }
+        var showMembers by rememberSaveable { mutableStateOf(false) }
         val lifecycleOwner = LocalLifecycleOwner.current
         val latestChatVisible by rememberUpdatedState(!showSettings)
         val latestConfigLoaded by rememberUpdatedState(configLoaded)
@@ -156,6 +165,8 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
                     Header(
                         viewModel = viewModel,
                         onMenu = { scope.launch { drawerState.open() } },
+                        showMembersAction = !showSettings && classifyTarget(viewModel.currentTarget) == TargetKind.CHANNEL,
+                        onShowMembers = { showMembers = true },
                         onConnect = {
                             if (viewModel.connect()) {
                                 store.save(viewModel.config)?.let(viewModel::showFeedback)
@@ -204,11 +215,30 @@ fun KxIrcApp(viewModel: IrcViewModel = viewModel()) {
                 }
             )
         }
+        if (showMembers && classifyTarget(viewModel.currentTarget) == TargetKind.CHANNEL) {
+            ChannelMembersSheet(
+                viewModel = viewModel,
+                channel = viewModel.currentTarget,
+                onDismiss = { showMembers = false },
+                onMessage = { nick ->
+                    showMembers = false
+                    viewModel.openPrivateChat(nick)
+                }
+            )
+        }
     }
 }
 
 @Composable
 private fun ChatContent(viewModel: IrcViewModel, modifier: Modifier = Modifier) {
+    val currentTarget = viewModel.currentTarget
+    val connectionGeneration = viewModel.connectionGeneration
+    val listState = rememberLazyListState()
+    val visibleMessageCount = viewModel.visibleMessages().size
+    var composerFocused by remember(currentTarget, connectionGeneration) { mutableStateOf(false) }
+    var wasAtBottomWhenComposerFocused by remember(currentTarget, connectionGeneration) { mutableStateOf(true) }
+    var forceScrollRequest by remember(currentTarget, connectionGeneration) { mutableStateOf(0) }
+
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         val failedStatus = viewModel.status as? ConnectionStatus.Failed
         if (failedStatus != null) {
@@ -218,9 +248,32 @@ private fun ChatContent(viewModel: IrcViewModel, modifier: Modifier = Modifier) 
                 modifier = Modifier.testTag("connectionError")
             )
         }
-        MessageList(viewModel, Modifier.weight(1f))
+        MessageList(
+            viewModel = viewModel,
+            listState = listState,
+            keepAtBottom = composerFocused && wasAtBottomWhenComposerFocused,
+            forceScrollRequest = forceScrollRequest,
+            modifier = Modifier.weight(1f)
+        )
         HorizontalDivider()
-        MessageComposer(viewModel)
+        MessageComposer(
+            viewModel = viewModel,
+            onFocusChanged = { focused ->
+                if (focused && !composerFocused) {
+                    wasAtBottomWhenComposerFocused = isNearBottom(listState, visibleMessageCount)
+                }
+                composerFocused = focused
+            },
+            onMessageSubmitted = {
+                if (shouldRevealSentMessage(
+                        currentlyAtBottom = isNearBottom(listState, visibleMessageCount),
+                        wasAtBottomWhenTypingStarted = wasAtBottomWhenComposerFocused
+                    )
+                ) {
+                    forceScrollRequest += 1
+                }
+            }
+        )
     }
 }
 
@@ -228,6 +281,8 @@ private fun ChatContent(viewModel: IrcViewModel, modifier: Modifier = Modifier) 
 private fun Header(
     viewModel: IrcViewModel,
     onMenu: () -> Unit,
+    showMembersAction: Boolean,
+    onShowMembers: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit
 ) {
@@ -246,6 +301,11 @@ private fun Header(
             }
         },
         actions = {
+            if (showMembersAction) {
+                IconButton(onClick = onShowMembers, modifier = Modifier.testTag("membersButton")) {
+                    Icon(Icons.Filled.People, contentDescription = "Channel members")
+                }
+            }
             val isConnected = status is ConnectionStatus.Connected || status is ConnectionStatus.Connecting
             Button(
                 onClick = { if (isConnected) onDisconnect() else onConnect() },
@@ -326,9 +386,14 @@ private fun ConnectionForm(viewModel: IrcViewModel) {
 }
 
 @Composable
-private fun MessageList(viewModel: IrcViewModel, modifier: Modifier = Modifier) {
+private fun MessageList(
+    viewModel: IrcViewModel,
+    listState: LazyListState,
+    keepAtBottom: Boolean,
+    forceScrollRequest: Int,
+    modifier: Modifier = Modifier
+) {
     val messages = viewModel.visibleMessages()
-    val listState = rememberLazyListState()
     val currentTarget = viewModel.currentTarget
     val connectionGeneration = viewModel.connectionGeneration
     var shouldAutoScroll by remember(currentTarget, connectionGeneration) { mutableStateOf(true) }
@@ -338,12 +403,32 @@ private fun MessageList(viewModel: IrcViewModel, modifier: Modifier = Modifier) 
         if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty() && (shouldAutoScroll || isNearBottom(listState, messages.size))) {
+        if (messages.isNotEmpty() && (keepAtBottom || shouldAutoScroll || isNearBottom(listState, messages.size))) {
             listState.scrollToItem(messages.lastIndex)
         }
     }
-    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, messages.size) {
-        if (messages.isNotEmpty()) shouldAutoScroll = isNearBottom(listState, messages.size)
+    LaunchedEffect(keepAtBottom, messages.size) {
+        if (keepAtBottom && messages.isNotEmpty()) {
+            snapshotFlow { listState.layoutInfo.viewportEndOffset }
+                .distinctUntilChanged()
+                .collect { listState.scrollToItem(messages.lastIndex) }
+        }
+    }
+    LaunchedEffect(forceScrollRequest) {
+        if (forceScrollRequest > 0 && messages.isNotEmpty()) {
+            shouldAutoScroll = true
+            listState.scrollToItem(messages.lastIndex)
+        }
+    }
+    LaunchedEffect(
+        listState.firstVisibleItemIndex,
+        listState.firstVisibleItemScrollOffset,
+        messages.size,
+        keepAtBottom
+    ) {
+        if (messages.isNotEmpty()) {
+            shouldAutoScroll = keepAtBottom || isNearBottom(listState, messages.size)
+        }
     }
 
     LazyColumn(
@@ -381,7 +466,11 @@ private fun MessageList(viewModel: IrcViewModel, modifier: Modifier = Modifier) 
 }
 
 @Composable
-private fun MessageComposer(viewModel: IrcViewModel) {
+private fun MessageComposer(
+    viewModel: IrcViewModel,
+    onFocusChanged: (Boolean) -> Unit,
+    onMessageSubmitted: () -> Unit
+) {
     val currentTarget = viewModel.currentTarget
     var message by rememberSaveable(currentTarget) { mutableStateOf(viewModel.draftFor(currentTarget)) }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -395,6 +484,7 @@ private fun MessageComposer(viewModel: IrcViewModel) {
         if (!canSend) return@send
         val targetAtSend = currentTarget
         if (!viewModel.submitComposerInput(message)) return@send
+        onMessageSubmitted()
         message = ""
         viewModel.updateDraft(targetAtSend, "")
         focusManager.clearFocus()
@@ -440,7 +530,11 @@ private fun MessageComposer(viewModel: IrcViewModel) {
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = { sendMessage() }),
             enabled = inputEnabled,
-            modifier = Modifier.fillMaxWidth().testTag("messageField").onPreviewKeyEvent { event ->
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("messageField")
+                .onFocusChanged { onFocusChanged(it.isFocused) }
+                .onPreviewKeyEvent { event ->
                 val native = event.nativeKeyEvent
                 if (native.keyCode == KeyEvent.KEYCODE_ENTER && native.action == KeyEvent.ACTION_UP) {
                     sendMessage()
@@ -482,7 +576,129 @@ private fun MessageComposer(viewModel: IrcViewModel) {
 private fun isNearBottom(listState: LazyListState, totalItems: Int): Boolean {
     if (totalItems <= 0) return true
     val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return true
-    return lastVisible >= totalItems - 2
+    return lastVisible >= totalItems - 1
+}
+
+internal fun shouldRevealSentMessage(
+    currentlyAtBottom: Boolean,
+    wasAtBottomWhenTypingStarted: Boolean
+): Boolean = currentlyAtBottom || wasAtBottomWhenTypingStarted
+
+@Composable
+private fun ChannelMembersSheet(
+    viewModel: IrcViewModel,
+    channel: String,
+    onDismiss: () -> Unit,
+    onMessage: (String) -> Unit
+) {
+    val members = viewModel.channelMembers(channel)
+    val canModerate = viewModel.canModerateChannel(channel)
+    var selectedMember by remember(channel) { mutableStateOf<ChannelMember?>(null) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("membersSheet")
+    ) {
+        Text(
+            text = "${members.size} people in $channel",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
+        )
+        if (members.isEmpty()) {
+            Text(
+                text = "Waiting for the channel member list…",
+                modifier = Modifier.padding(24.dp).testTag("membersEmpty")
+            )
+        } else {
+            LazyColumn(modifier = Modifier.fillMaxWidth().testTag("membersList")) {
+                items(members, key = { ircCaseFold(it.nick) }) { member ->
+                    val isOwnNick = viewModel.isOwnNick(member.nick)
+                    ListItem(
+                        headlineContent = { Text("${member.displayPrefix}${member.nick}") },
+                        supportingContent = {
+                            Text(
+                                when {
+                                    isOwnNick && member.isOperator -> "You · operator"
+                                    isOwnNick -> "You"
+                                    member.isOperator -> "Operator · tap to message"
+                                    member.isVoiced -> "Voiced · tap to message"
+                                    else -> "Tap to message"
+                                }
+                            )
+                        },
+                        trailingContent = {
+                            if (canModerate && !isOwnNick) {
+                                IconButton(
+                                    onClick = { selectedMember = member },
+                                    modifier = Modifier.testTag("memberActions_${member.nick}")
+                                ) {
+                                    Icon(Icons.Filled.MoreVert, contentDescription = "Actions for ${member.nick}")
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("member_${member.nick}")
+                            .clickable(enabled = !isOwnNick) { onMessage(member.nick) }
+                    )
+                }
+            }
+        }
+    }
+
+    selectedMember?.let { member ->
+        AlertDialog(
+            onDismissRequest = { selectedMember = null },
+            title = { Text(member.nick) },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    TextButton(
+                        onClick = {
+                            selectedMember = null
+                            onMessage(member.nick)
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("messageMemberAction")
+                    ) {
+                        Text("Message")
+                    }
+                    if (!member.isVoiced) {
+                        TextButton(
+                            onClick = {
+                                viewModel.voiceMember(channel, member.nick)
+                                selectedMember = null
+                            },
+                            modifier = Modifier.fillMaxWidth().testTag("voiceMemberAction")
+                        ) {
+                            Text("Give voice")
+                        }
+                    }
+                    if (!member.isOperator) {
+                        TextButton(
+                            onClick = {
+                                viewModel.opMember(channel, member.nick)
+                                selectedMember = null
+                            },
+                            modifier = Modifier.fillMaxWidth().testTag("opMemberAction")
+                        ) {
+                            Text("Make operator")
+                        }
+                    }
+                    TextButton(
+                        onClick = {
+                            viewModel.kickMember(channel, member.nick)
+                            selectedMember = null
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("kickMemberAction")
+                    ) {
+                        Text("Kick", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedMember = null }) { Text("Cancel") }
+            }
+        )
+    }
 }
 
 @Composable

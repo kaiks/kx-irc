@@ -34,8 +34,26 @@ data class IrcMessage(
 
 data class ChannelRosterUpdate(
     val channel: String,
-    val nicknames: List<String>
+    val members: List<ChannelMember>
 )
+
+data class ChannelMember(
+    val nick: String,
+    val privileges: Set<Char> = emptySet()
+) {
+    val isOperator: Boolean
+        get() = privileges.any { it in "~&@" }
+
+    val isVoiced: Boolean
+        get() = privileges.any { it in "~&@%+" }
+
+    val displayPrefix: String
+        get() = PRIVILEGE_ORDER.firstOrNull(privileges::contains)?.toString().orEmpty()
+
+    private companion object {
+        const val PRIVILEGE_ORDER = "~&@%+"
+    }
+}
 
 enum class TargetKind { SERVER, CHANNEL, PRIVATE }
 
@@ -223,10 +241,57 @@ fun isIrcMention(body: String, nick: String, caseMapping: IrcCaseMapping = IrcCa
     return false
 }
 
-internal fun parseChannelNames(rawNames: String): List<String> =
+internal fun parseChannelMembers(rawNames: String): List<ChannelMember> =
     rawNames.split(' ')
-        .map { it.trimStart('~', '&', '@', '%', '+') }
-        .filter(::isValidIrcNick)
+        .mapNotNull { rawName ->
+            val privileges = rawName.takeWhile { it in "~&@%+" }.toSet()
+            val nick = rawName.drop(privileges.size)
+            nick.takeIf(::isValidIrcNick)?.let { ChannelMember(it, privileges) }
+        }
+
+internal fun parseChannelNames(rawNames: String): List<String> =
+    parseChannelMembers(rawNames).map(ChannelMember::nick)
+
+internal fun applyChannelMemberModes(
+    members: MutableList<ChannelMember>,
+    modeString: String,
+    arguments: List<String>,
+    caseMapping: IrcCaseMapping = IrcCaseMapping.RFC1459
+): Boolean {
+    var adding = true
+    var argumentIndex = 0
+    var changed = false
+    modeString.forEach { mode ->
+        when (mode) {
+            '+' -> adding = true
+            '-' -> adding = false
+            else -> {
+                val takesArgument = mode in "qaohvbeIk" || (mode == 'l' && adding)
+                val argument = if (takesArgument) arguments.getOrNull(argumentIndex++) else null
+                val prefix = when (mode) {
+                    'q' -> '~'
+                    'a' -> '&'
+                    'o' -> '@'
+                    'h' -> '%'
+                    'v' -> '+'
+                    else -> null
+                }
+                if (prefix != null && argument != null) {
+                    val memberIndex = members.indexOfFirst { ircEquals(it.nick, argument, caseMapping) }
+                    if (memberIndex != -1) {
+                        val member = members[memberIndex]
+                        val updatedPrivileges = if (adding) member.privileges + prefix else member.privileges - prefix
+                        if (updatedPrivileges != member.privileges) {
+                            members[memberIndex] = member.copy(privileges = updatedPrivileges)
+                            changed = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return changed
+}
 
 internal fun findMentionSuggestions(
     draft: String,

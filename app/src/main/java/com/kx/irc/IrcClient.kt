@@ -150,8 +150,12 @@ class IrcClient {
             "353" -> {
                 val channel = parsed.params.lastOrNull().orEmpty()
                 if (classifyTarget(channel) == TargetKind.CHANNEL) {
-                    if (session.namesInProgress.add(channel)) session.channelMembers[channel] = linkedSetOf()
-                    session.channelMembers.getOrPut(channel) { linkedSetOf() }.addAll(parseChannelNames(parsed.trailing.orEmpty()))
+                    if (session.namesInProgress.add(channel)) session.channelMembers[channel] = mutableListOf()
+                    val roster = session.channelMembers.getOrPut(channel) { mutableListOf() }
+                    parseChannelMembers(parsed.trailing.orEmpty()).forEach { incoming ->
+                        val index = roster.indexOfFirst { ircEquals(it.nick, incoming.nick, _caseMapping.value) }
+                        if (index == -1) roster.add(incoming) else roster[index] = incoming
+                    }
                 }
             }
             "366" -> {
@@ -235,6 +239,12 @@ class IrcClient {
                 val rest = (parsed.params.drop(1) + listOfNotNull(parsed.trailing)).joinToString(" ")
                 val body = if (rest.isBlank()) raw else "* $sender set mode $rest"
                 val resolvedTarget = if (classifyTarget(target) == TargetKind.CHANNEL) target else "server"
+                val roster = session.channelMembers[target]
+                val modeString = parsed.params.getOrNull(1).orEmpty()
+                val modeArguments = parsed.params.drop(2) + listOfNotNull(parsed.trailing)
+                if (roster != null && applyChannelMemberModes(roster, modeString, modeArguments, _caseMapping.value)) {
+                    emitRoster(session, target)
+                }
                 emitServerMessage(resolvedTarget, body, timestamp)
             }
             "ERROR" -> failSession(session, parsed.trailing.orEmpty().ifBlank { raw })
@@ -314,6 +324,15 @@ class IrcClient {
 
     fun changeNick(nick: String) {
         sendCommand("NICK $nick", "Failed to change nickname")
+    }
+
+    fun kick(channel: String, nick: String) {
+        sendCommand("KICK $channel $nick", "Failed to kick $nick")
+    }
+
+    fun setChannelMemberMode(channel: String, nick: String, mode: Char) {
+        if (mode !in "ov") return
+        sendCommand("MODE $channel +$mode $nick", "Failed to set mode +$mode on $nick")
     }
 
     private fun sendCommand(command: String, failureMessage: String) {
@@ -413,7 +432,8 @@ class IrcClient {
                         "server-time",
                         "znc.in/server-time-iso",
                         "znc.in/server-time",
-                        "echo-message"
+                        "echo-message",
+                        "multi-prefix"
                     ).filter { capability -> session.capBuffer.any { it.substringBefore('=').removePrefix("~") == capability } }
                     if (requested.isNotEmpty()) {
                         writeLine(session, "CAP REQ :${requested.joinToString(" ")}")
@@ -462,16 +482,15 @@ class IrcClient {
 
     private suspend fun addRosterMember(session: Session, channel: String, nick: String) {
         if (channel.isBlank() || nick.isBlank()) return
-        val roster = session.channelMembers.getOrPut(channel) { linkedSetOf() }
-        val existing = roster.firstOrNull { ircEquals(it, nick, _caseMapping.value) }
-        if (existing != null) roster.remove(existing)
-        roster.add(nick)
+        val roster = session.channelMembers.getOrPut(channel) { mutableListOf() }
+        val existingIndex = roster.indexOfFirst { ircEquals(it.nick, nick, _caseMapping.value) }
+        if (existingIndex == -1) roster.add(ChannelMember(nick))
         emitRoster(session, channel)
     }
 
     private suspend fun removeRosterMember(session: Session, channel: String, nick: String) {
         val roster = session.channelMembers[channel] ?: return
-        val removed = roster.removeAll { ircEquals(it, nick, _caseMapping.value) }
+        val removed = roster.removeAll { ircEquals(it.nick, nick, _caseMapping.value) }
         if (removed) emitRoster(session, channel)
     }
 
@@ -483,9 +502,9 @@ class IrcClient {
         if (newNick.isBlank()) return
         session.channelMembers.keys.toList().forEach { channel ->
             val roster = session.channelMembers[channel] ?: return@forEach
-            val existing = roster.firstOrNull { ircEquals(it, oldNick, _caseMapping.value) } ?: return@forEach
-            roster.remove(existing)
-            roster.add(newNick)
+            val existingIndex = roster.indexOfFirst { ircEquals(it.nick, oldNick, _caseMapping.value) }
+            if (existingIndex == -1) return@forEach
+            roster[existingIndex] = roster[existingIndex].copy(nick = newNick)
             emitRoster(session, channel)
         }
     }
@@ -493,7 +512,14 @@ class IrcClient {
     private suspend fun emitRoster(session: Session, channel: String) {
         val roster = session.channelMembers[channel] ?: return
         _channelRosters.emit(
-            ChannelRosterUpdate(channel, roster.sortedBy { ircCaseFold(it, _caseMapping.value) })
+            ChannelRosterUpdate(
+                channel,
+                roster.sortedWith(
+                    compareByDescending<ChannelMember> { it.isOperator }
+                        .thenByDescending { it.isVoiced }
+                        .thenBy { ircCaseFold(it.nick, _caseMapping.value) }
+                )
+            )
         )
     }
 
@@ -537,7 +563,7 @@ class IrcClient {
         var currentNick = ""
         var capNegotiating = false
         val capBuffer = mutableSetOf<String>()
-        val channelMembers = mutableMapOf<String, MutableSet<String>>()
+        val channelMembers = mutableMapOf<String, MutableList<ChannelMember>>()
         val namesInProgress = mutableSetOf<String>()
 
         fun attach(newSocket: Socket) {

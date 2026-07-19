@@ -9,9 +9,14 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.hasTestTag
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.espresso.Espresso
+import java.net.InetAddress
+import java.net.ServerSocket
+import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -20,11 +25,19 @@ class KxIrcUiTest {
     @get:Rule
     val rule = createAndroidComposeRule<MainActivity>()
 
+    private lateinit var silentServer: ServerSocket
+
     @Before
     fun resetPrefs() {
+        silentServer = ServerSocket(0, 1, InetAddress.getLoopbackAddress())
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         context.getSharedPreferences("kx_irc_prefs", 0).edit().clear().commit()
         rule.activityRule.scenario.recreate()
+    }
+
+    @After
+    fun closeSilentServer() {
+        silentServer.close()
     }
 
     @Test
@@ -55,7 +68,8 @@ class KxIrcUiTest {
     @Test
     fun messageInputIsDisabledUntilConnected() {
         ensureSettingsVisible()
-        rule.onNodeWithTag("hostField").performTextInput("127.0.0.1")
+        enterSilentServer()
+        Espresso.closeSoftKeyboard()
         rule.onNodeWithTag("connectButton").performClick()
 
         rule.onNodeWithTag("contentList").assertIsDisplayed()
@@ -67,9 +81,24 @@ class KxIrcUiTest {
     @Test
     fun inlineSendButtonPresentInComposer() {
         ensureSettingsVisible()
-        rule.onNodeWithTag("hostField").performTextInput("127.0.0.1")
+        enterSilentServer()
+        Espresso.closeSoftKeyboard()
         rule.onNodeWithTag("connectButton").performClick()
         rule.onNodeWithTag("inlineSendButton").assertIsDisplayed()
+    }
+
+    @Test
+    fun channelChatOffersMemberSheet() {
+        ensureSettingsVisible()
+        enterSilentServer()
+        rule.onNodeWithTag("settingsList").performScrollToNode(hasTestTag("channelsField"))
+        rule.onNodeWithTag("channelsField").performTextInput("#general")
+        Espresso.closeSoftKeyboard()
+        rule.onNodeWithTag("connectButton").performClick()
+
+        rule.onNodeWithTag("membersButton").assertIsDisplayed().performClick()
+        rule.onNodeWithTag("membersSheet").assertIsDisplayed()
+        rule.onNodeWithTag("membersEmpty").assertIsDisplayed()
     }
 
     @Test
@@ -103,5 +132,11 @@ class KxIrcUiTest {
         rule.waitUntil(5_000) {
             rule.onAllNodesWithTag("settingsList").fetchSemanticsNodes().isNotEmpty()
         }
+    }
+
+    private fun enterSilentServer() {
+        rule.onNodeWithTag("hostField").performTextInput("127.0.0.1")
+        rule.onNodeWithTag("portField").performTextClearance()
+        rule.onNodeWithTag("portField").performTextInput(silentServer.localPort.toString())
     }
 }
